@@ -1,0 +1,116 @@
+{
+  "app": "demo_app",
+  "description": "Ground truth for the demo app. A scanner finding matches a label when it is in the same file and its line falls inside the label's line range (inclusive).",
+  "labels": [
+    {
+      "id": "TP-01",
+      "verdict": "true_positive",
+      "cwe": "CWE-89",
+      "title": "SQL injection in user search",
+      "file": "db.py",
+      "lines": [15, 16],
+      "function": "find_users_by_name",
+      "why": "The `name` query parameter from /users/search (app.py search_users) is passed unchanged into an f-string SQL query. The source and the sink are in different files."
+    },
+    {
+      "id": "TP-02",
+      "verdict": "true_positive",
+      "cwe": "CWE-1336",
+      "title": "Server-side template injection in /hello",
+      "file": "app.py",
+      "lines": [50, 50],
+      "function": "hello",
+      "why": "User input is formatted into the template source itself before render_template_string, so {{ ... }} in `name` is executed by Jinja2."
+    },
+    {
+      "id": "TP-03",
+      "verdict": "true_positive",
+      "cwe": "CWE-78",
+      "title": "Command injection in DNS lookup tool",
+      "file": "app.py",
+      "lines": [59, 61],
+      "function": "dns_lookup",
+      "why": "The `domain` parameter goes unvalidated into a shell command run with shell=True, e.g. ?domain=x;id."
+    },
+    {
+      "id": "TP-04",
+      "verdict": "true_positive",
+      "cwe": "CWE-22",
+      "title": "Path traversal in file download",
+      "file": "app.py",
+      "lines": [81, 83],
+      "function": "download",
+      "why": "The <path:filename> URL segment is joined to UPLOAD_DIR with no normalization or containment check, so ../ sequences escape the folder."
+    },
+    {
+      "id": "TP-05",
+      "verdict": "true_positive",
+      "cwe": "CWE-502",
+      "title": "Insecure deserialization of request body",
+      "file": "app.py",
+      "lines": [88, 88],
+      "function": "restore_session",
+      "why": "pickle.loads on the raw request body lets an attacker execute arbitrary code."
+    },
+    {
+      "id": "TP-06",
+      "verdict": "true_positive",
+      "cwe": "CWE-916",
+      "title": "Passwords hashed with unsalted MD5",
+      "file": "app.py",
+      "lines": [42, 42],
+      "function": "register",
+      "why": "MD5 is fast and unsalted, so stored password hashes can be cracked quickly. A password hashing function such as bcrypt or argon2 is needed."
+    },
+    {
+      "id": "FP-01",
+      "verdict": "false_positive",
+      "cwe": "CWE-89",
+      "title": "f-string SQL with an integer-only value",
+      "file": "db.py",
+      "lines": [23, 24],
+      "function": "get_user_by_id",
+      "why": "The only caller (app.py get_user) converts the value with int() first, so nothing but digits can reach the query. Still poor style, but not exploitable."
+    },
+    {
+      "id": "FP-02",
+      "verdict": "false_positive",
+      "cwe": "CWE-78",
+      "title": "shell=True with a validated and quoted host",
+      "file": "app.py",
+      "lines": [70, 72],
+      "function": "ping",
+      "why": "`host` must match a strict hostname regex (else 400) and is also passed through shlex.quote, so no shell metacharacters survive."
+    },
+    {
+      "id": "FP-03",
+      "verdict": "false_positive",
+      "cwe": "CWE-502",
+      "title": "pickle on a cache file only the app writes",
+      "file": "app.py",
+      "lines": [95, 105],
+      "function": "save_stats / load_stats",
+      "why": "The pickle file path is a constant inside the app folder and is written only by save_stats; no user input reaches it."
+    },
+    {
+      "id": "FP-04",
+      "verdict": "false_positive",
+      "cwe": "CWE-328",
+      "title": "MD5 used for an ETag",
+      "file": "app.py",
+      "lines": [117, 117],
+      "function": "about",
+      "why": "The hash is a cache validator for a constant string, not a security control, so MD5's weakness does not matter here."
+    },
+    {
+      "id": "FP-05",
+      "verdict": "false_positive",
+      "cwe": null,
+      "title": "Import-level warnings for pickle and subprocess",
+      "file": "app.py",
+      "lines": [5, 8],
+      "function": null,
+      "why": "Informational warnings that a risky module is imported. Each real use is labeled separately."
+    }
+  ]
+}
