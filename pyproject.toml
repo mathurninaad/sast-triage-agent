@@ -5,6 +5,7 @@ description = "Runs SAST scanners on a codebase and uses an AI agent to triage e
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "semgrep>=1.140",
     "typer>=0.12",
 ]
 

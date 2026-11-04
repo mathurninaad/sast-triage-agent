@@ -22,3 +22,6 @@ venv/
 # Runtime output
 *.sqlite
 reports/
+
+# Cloned third-party evaluation targets (see eval/targets/README.md)
+eval/targets/*/
