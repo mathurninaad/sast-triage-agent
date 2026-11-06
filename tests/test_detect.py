@@ -50,4 +50,5 @@ def test_not_a_folder(tmp_path):
 
 
 def test_demo_app():
-    assert detect.count_languages(DEMO_APP) == {"python": 2, "json": 1}
+    # Only the app's own code: the answer key lives in eval/labels/, not here.
+    assert detect.count_languages(DEMO_APP) == {"python": 2}
