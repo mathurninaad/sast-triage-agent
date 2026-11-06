@@ -16,9 +16,6 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-# Registry rulesets used when the caller doesn't pass any.
-DEFAULT_CONFIGS: tuple[str, ...] = ("p/python", "p/flask", "p/django", "p/owasp-top-ten")
-
 _CWE_RE = re.compile(r"CWE-\d+")
 
 
@@ -55,8 +52,8 @@ def build_command(target: str, configs: list[str] | tuple[str, ...]) -> list[str
 
 def run_semgrep(
     target: Path,
-    configs: list[str] | tuple[str, ...] = DEFAULT_CONFIGS,
-    timeout: int = 900,
+    configs: list[str] | tuple[str, ...],
+    timeout: int = 1800,
 ) -> dict[str, Any]:
     """Run semgrep on `target` and return its parsed JSON output, unchanged.
 
@@ -90,6 +87,22 @@ def run_semgrep(
 
 
 # Helpers for reading individual results
+
+
+def is_security(result: dict[str, Any]) -> bool:
+    """True if the rule that produced this result is a security rule.
+
+    The rules repo also has correctness, maintainability and best-practice
+    rules (code quality, not vulnerabilities); those are filtered out.
+    """
+    return result.get("extra", {}).get("metadata", {}).get("category") == "security"
+
+
+def security_only(output: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Copy of `output` keeping only security results, plus how many were dropped."""
+    results = output.get("results", [])
+    kept = [r for r in results if is_security(r)]
+    return {**output, "results": kept}, len(results) - len(kept)
 
 
 def short_rule_id(check_id: str) -> str:
