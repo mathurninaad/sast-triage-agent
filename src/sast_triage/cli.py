@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from sast_triage import __version__, detect, rules, targets
+from sast_triage import __version__, cache, detect, rules, targets
 from sast_triage.scanners import semgrep as sg
 
 app = typer.Typer(
@@ -17,6 +17,9 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+cache_app = typer.Typer(help="Inspect or clear downloaded rules and repos.", no_args_is_help=True)
+app.add_typer(cache_app, name="cache")
 
 
 @app.callback()
@@ -164,3 +167,52 @@ def semgrep_baseline(
             table.add_row(name, str(count))
         console.print(table)
     console.print(f"Raw output saved to [bold]{out}[/]")
+
+
+@cache_app.command("info")
+def cache_info() -> None:
+    """Show what's in the download cache and how much space it uses."""
+    root = rules.default_cache_dir()
+    found = cache.entries(root)
+    console.print(f"Cache folder: [bold]{root}[/]")
+    if not found:
+        console.print("The cache is empty.")
+        return
+    table = Table(title_justify="left")
+    table.add_column("kind")
+    table.add_column("name")
+    table.add_column("commit")
+    table.add_column("size", justify="right")
+    for e in found:
+        table.add_row(e.kind, e.name, (e.commit or "-")[:12], cache.human_size(e.size_bytes))
+    console.print(table)
+    total = sum(e.size_bytes for e in found)
+    console.print(f"Total: [bold]{cache.human_size(total)}[/]")
+
+
+@cache_app.command("clear")
+def cache_clear(
+    repos_only: Annotated[bool, typer.Option("--repos-only", help="Keep the rules, delete fetched repos.")] = False,
+    rules_only: Annotated[bool, typer.Option("--rules-only", help="Keep repos, delete the rules.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
+) -> None:
+    """Delete downloaded rules and/or repos. They are downloaded again when needed."""
+    if repos_only and rules_only:
+        console.print("[red]Error:[/] choose at most one of --repos-only and --rules-only.")
+        raise typer.Exit(code=1)
+    root = rules.default_cache_dir()
+    clear_repos, clear_rules = not rules_only, not repos_only
+    chosen = [
+        e for e in cache.entries(root)
+        if (e.kind == "repo" and clear_repos) or (e.kind == "rules" and clear_rules)
+    ]
+    if not chosen:
+        console.print("Nothing to clear.")
+        return
+    size = cache.human_size(sum(e.size_bytes for e in chosen))
+    what = "repos" if repos_only else "rules" if rules_only else "rules and repos"
+    if not yes and not typer.confirm(f"Delete cached {what} ({len(chosen)} items, {size}) in {root}?"):
+        console.print("Cancelled.")
+        raise typer.Exit()
+    freed = cache.clear(root, repos=clear_repos, rules=clear_rules)
+    console.print(f"Freed {cache.human_size(freed)}.")

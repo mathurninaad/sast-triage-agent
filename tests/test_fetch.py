@@ -74,3 +74,21 @@ def test_size_limit(source_repo, tmp_path):
     with pytest.raises(fetch.FetchError, match="over the"):
         fetch.fetch_commit(str(source_repo), dest, max_mb=0.000001)
     assert not dest.exists()
+
+
+def test_failed_refetch_keeps_existing_copy(source_repo, tmp_path):
+    dest = tmp_path / "dest"
+    good = fetch.fetch_commit(str(source_repo), dest)
+    with pytest.raises(fetch.FetchError, match="no branch, tag or commit"):
+        fetch.fetch_commit(str(source_repo), dest, ref="no-such-branch")
+    # the earlier good copy is still there and still marked complete
+    assert (dest / "app.py").read_text() == "print('v2')\n"
+    assert fetch.is_complete(dest)
+    assert (dest / ".sast-triage-complete").read_text() == good
+
+
+def test_failed_first_fetch_removes_empty_parent(tmp_path):
+    dest = tmp_path / "repos" / "someone" / "missing"
+    with pytest.raises(fetch.FetchError):
+        fetch.fetch_commit(str(tmp_path / "no-such-repo"), dest)
+    assert not (tmp_path / "repos" / "someone").exists()

@@ -46,6 +46,20 @@ v1.0, which does not allow redistributing them, so they are never copied into
 this repository. The summary leaves out code-quality results (correctness, maintainability, best-practice); the raw JSON in
 `reports/` is Semgrep's full output.
 
+## Download cache
+
+Downloaded rules and repos are kept between runs (nothing removes them
+automatically) so they aren't downloaded again:
+
+```bash
+uv run sast-triage cache info                 # what's cached, commits, sizes
+uv run sast-triage cache clear                # delete everything (asks first)
+uv run sast-triage cache clear --repos-only   # keep the rules, drop fetched repos
+```
+
+`clear` only ever deletes the folders this tool creates, so pointing
+`SAST_TRIAGE_CACHE` at a folder with other files in it can't lose them.
+
 ## Run tests
 
 ```bash

@@ -46,6 +46,39 @@ def is_complete(dest: Path) -> bool:
     return (dest / _MARKER).exists()
 
 
+def _discard(dest: Path) -> None:
+    """Delete a download folder, and its parent too if that leaves it empty."""
+    shutil.rmtree(dest, ignore_errors=True)
+    try:
+        dest.parent.rmdir()  # only succeeds if empty, e.g. repos/<owner>/
+    except OSError:
+        pass
+
+
+def _as_fetch_error(exc: Exception, url: str, ref: str | None, timeout: int) -> FetchError:
+    """Turn a git failure into one readable FetchError."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return FetchError(f"downloading {url} took longer than {timeout}s")
+    if isinstance(exc, FileNotFoundError):
+        return FetchError("git is not installed")
+    stderr = getattr(exc, "stderr", "") or ""
+    if "could not read Username" in stderr or "Authentication failed" in stderr:
+        # GitHub answers a missing repo with a login prompt, in case it's private.
+        hint = "repository not found, or it is private"
+    elif "couldn't find remote ref" in stderr or "not our ref" in stderr:
+        hint = f"no branch, tag or commit named {ref!r}"
+    else:
+        lines = stderr.strip().splitlines()
+        hint = lines[-1] if lines else "unknown git error"
+    return FetchError(
+        f"could not download {url}{f' at {ref}' if ref else ''}: {hint}\n"
+        "Check the URL and ref; private repositories are not supported."
+    )
+
+
+_GIT_ERRORS = (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError)
+
+
 def fetch_commit(
     url: str,
     dest: Path,
@@ -56,40 +89,35 @@ def fetch_commit(
     """Fetch `ref` (default: the repo's default branch) of `url` into `dest`.
 
     Re-fetching into an existing `dest` updates it in place; git only
-    downloads what changed. Returns the full commit hash that was checked out.
+    downloads what changed. If the fetch fails, an existing good copy is
+    left untouched; only a folder this call created is removed.
+    Returns the full commit hash that was checked out.
     """
+    existed = (dest / ".git").exists()
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / _MARKER).unlink(missing_ok=True)  # incomplete until we finish
+
+    # 1. Download. Nothing on disk that we care about changes yet.
     try:
-        if not (dest / ".git").exists():
+        if not existed:
             _git("init", "--quiet", cwd=dest, timeout=timeout)
         _git("fetch", "--quiet", "--depth", "1", url, ref or "HEAD", cwd=dest, timeout=timeout)
+    except _GIT_ERRORS as exc:
+        if not existed:
+            _discard(dest)
+        raise _as_fetch_error(exc, url, ref, timeout) from None
+
+    # 2. Swap the files over. The copy counts as incomplete until this finishes.
+    (dest / _MARKER).unlink(missing_ok=True)
+    try:
         _git("checkout", "--quiet", "--force", "FETCH_HEAD", cwd=dest, timeout=timeout)
         commit = _git("rev-parse", "HEAD", cwd=dest, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise FetchError(f"downloading {url} took longer than {timeout}s") from None
-    except subprocess.CalledProcessError as exc:
-        shutil.rmtree(dest, ignore_errors=True)
-        stderr = exc.stderr or ""
-        if "could not read Username" in stderr or "Authentication failed" in stderr:
-            # GitHub answers a missing repo with a login prompt, in case it's private.
-            hint = "repository not found, or it is private"
-        elif "couldn't find remote ref" in stderr or "not our ref" in stderr:
-            hint = f"no branch, tag or commit named {ref!r}"
-        else:
-            lines = stderr.strip().splitlines()
-            hint = lines[-1] if lines else "unknown git error"
-        raise FetchError(
-            f"could not download {url}{f' at {ref}' if ref else ''}: {hint}\n"
-            "Check the URL and ref; private repositories are not supported."
-        ) from None
-    except FileNotFoundError:
-        raise FetchError("git is not installed") from None
+    except _GIT_ERRORS as exc:
+        _discard(dest)  # half-swapped files can't be trusted
+        raise _as_fetch_error(exc, url, ref, timeout) from None
 
     size = _size_mb(dest)
     if size > max_mb:
-        shutil.rmtree(dest, ignore_errors=True)
+        _discard(dest)
         raise FetchError(f"{url} is {size:.0f} MB, over the {max_mb:.0f} MB limit")
     (dest / _MARKER).write_text(commit)
     return commit
