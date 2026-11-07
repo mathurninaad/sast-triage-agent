@@ -35,8 +35,13 @@ uv run sast-triage semgrep https://github.com/adeyosemanputra/pygoat
 uv run sast-triage semgrep https://github.com/owner/repo --ref v2.0   # a branch, tag or commit
 ```
 
-Each scan saves Semgrep's raw output to `reports/semgrep-<name>.json` and a
-`.meta.json` next to it recording the target, commit, rules and versions used.
+Each scan saves three files in `reports/`:
+
+- `semgrep-<name>.json`: Semgrep's raw output, untouched.
+- `semgrep-<name>.meta.json`: the target, commit, rules and versions used.
+- `findings-<name>.json`: our own `Finding` format (see `models.py`): clean
+  rule IDs, the flagged code snippet, severity, CWEs, the rule's hints, and
+  a fingerprint that stays the same when the code moves to other lines.
 
 When no `-c` is given, Semgrep's open-source rules
 ([semgrep/semgrep-rules](https://github.com/semgrep/semgrep-rules)) are

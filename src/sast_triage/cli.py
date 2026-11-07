@@ -149,6 +149,17 @@ def semgrep_baseline(
     out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=2))
 
     shown, dropped = (output, 0) if all_categories else sg.security_only(output)
+
+    # Our own format: one Finding per result, with snippet and stable fingerprint.
+    base_dir = resolved.path if resolved.path.is_dir() else resolved.path.parent
+    findings = sg.to_findings(shown, base_dir, configs)
+    findings_out = out.with_name(out.name.replace("semgrep-", "findings-", 1))
+    if findings_out == out:
+        findings_out = out.with_suffix(".findings.json")
+    findings_out.write_text(
+        json.dumps([f.model_dump(mode="json") for f in findings], indent=2)
+    )
+
     summary = sg.summarize(shown)
     console.print(
         f"\nSemgrep {summary['version']}: [bold]{summary['results']}[/] results at "
@@ -167,6 +178,7 @@ def semgrep_baseline(
             table.add_row(name, str(count))
         console.print(table)
     console.print(f"Raw output saved to [bold]{out}[/]")
+    console.print(f"{len(findings)} findings saved to [bold]{findings_out}[/]")
 
 
 @cache_app.command("info")
