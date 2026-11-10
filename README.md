@@ -82,6 +82,32 @@ call fails, that candidate is kept as `needs_review` with the error noted.
 Code is passed to the model inside `<code>` tags and marked as untrusted, so
 instructions hidden in comments are not followed.
 
+## Code-navigation tools (for the agent)
+
+The triage agent investigates with six read-only tools. Try them by hand:
+
+```bash
+uv run sast-triage tool examples/demo_app find_references get_user_by_id
+uv run sast-triage tool examples/demo_app get_function get_user
+uv run sast-triage tool examples/demo_app get_route_info get_user
+uv run sast-triage tool examples/demo_app search_code CACHE_FILE
+uv run sast-triage tool examples/demo_app read_file app.py 30 40
+uv run sast-triage tool examples/demo_app list_files "*.py"
+```
+
+| Tool | Answers |
+| --- | --- |
+| `list_files` | What files exist (glob pattern) |
+| `read_file` | Lines of a file, numbered (at most 150 at a time) |
+| `search_code` | Where text (or a regex) appears |
+| `get_function` | A function or class's source, with decorators |
+| `find_references` | Where a function is called or imported (Python `ast`, so comments and strings don't count) |
+| `get_route_info` | Which URL reaches a view (Flask/FastAPI decorators, Django `urls.py`) and its other decorators, e.g. login checks |
+
+They only read, every path must resolve inside the repository (no `..`,
+absolute paths or symlinks leading out), dependency folders are invisible,
+and output is capped so one call can't flood the model's context.
+
 ## CodeQL
 
 `scan` runs [CodeQL](https://codeql.github.com/) as a core scanner when it is

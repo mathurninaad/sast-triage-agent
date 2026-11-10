@@ -13,6 +13,8 @@ from rich.table import Table
 from dotenv import load_dotenv
 
 from sast_triage import __version__, cache, dedupe, detect, evaluate, rules, targets, triage
+from sast_triage.context import tools as ctx_tools
+from sast_triage.context.repo import Repo, RepoError
 from sast_triage.models import Candidate
 from sast_triage.scanners import bandit as bd
 from sast_triage.scanners import codeql as cq
@@ -557,3 +559,48 @@ def evaluate_cmd(
         console.print(f"Missed by every scanner (triage can't recover these): {', '.join(result['missed_by_scanners'])}")
     if result["needs_review"]:
         console.print(f"{result['needs_review']} candidates marked needs_review (kept for a human).")
+
+
+def _convert(value: str, annotation) -> object:
+    """Command-line text to the tool parameter's type (int / bool / str)."""
+    text = str(annotation)
+    if "bool" in text:
+        return value.lower() in ("1", "true", "yes", "y")
+    if "int" in text:
+        return int(value)
+    return value
+
+
+@app.command("tool")
+def tool_cmd(
+    target: TargetArg,
+    name: Annotated[str, typer.Argument(help=f"One of: {', '.join(ctx_tools.TOOLS)}")],
+    args: Annotated[Optional[list[str]], typer.Argument(help="Tool arguments, in order or as key=value.")] = None,
+) -> None:
+    """Call one of the agent's code-navigation tools by hand, e.g.
+    `sast-triage tool examples/demo_app find_references get_user_by_id`."""
+    import inspect
+
+    func = ctx_tools.TOOLS.get(name)
+    if func is None:
+        console.print(f"[red]Error:[/] unknown tool {name!r}; choose from {', '.join(ctx_tools.TOOLS)}")
+        raise typer.Exit(code=1)
+    resolved = _resolve(target, None)
+    params = [p for p in inspect.signature(func).parameters.values() if p.name != "repo"]
+    kwargs: dict[str, object] = {}
+    positional = [a for a in (args or []) if "=" not in a]
+    for param, value in zip(params, positional):
+        kwargs[param.name] = _convert(value, param.annotation)
+    for item in (a for a in (args or []) if "=" in a):
+        key, value = item.split("=", 1)
+        param = next((p for p in params if p.name == key), None)
+        if param is None:
+            console.print(f"[red]Error:[/] {name} has no argument {key!r} (has: {', '.join(p.name for p in params)})")
+            raise typer.Exit(code=1)
+        kwargs[key] = _convert(value, param.annotation)
+    try:
+        repo = Repo(resolved.path if resolved.path.is_dir() else resolved.path.parent)
+        console.print(func(repo, **kwargs), markup=False, highlight=False)
+    except (RepoError, TypeError, ValueError) as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(code=1) from None
