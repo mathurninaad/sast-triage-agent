@@ -30,6 +30,36 @@ become 12 candidates, each matching exactly one labelled item.
 Everything for one scan goes into `reports/<name>/`: `candidates.json`,
 `findings.json`, the raw `semgrep.json` / `bandit.json`, and `meta.json`.
 
+## Triage with an LLM (single-shot baseline)
+
+After a scan, an LLM judges each candidate: `true_positive`,
+`false_positive` or `needs_review`, with reasoning, an exploit scenario and
+a fix. It sees the flagged lines with 12 lines of context, every rule that
+fired, and CodeQL's data-flow trace when there is one. It **cannot open
+other files**; that is the job of the tool-using agent (next milestone), and
+this is the baseline that agent must beat.
+
+Models run on [Groq](https://console.groq.com/). Put your key in a `.env`
+file in the project folder (it is git-ignored, so it is never committed):
+
+```bash
+echo "GROQ_API_KEY=your-key-here" > .env
+```
+
+```bash
+uv run sast-triage scan examples/demo_app
+uv run sast-triage triage reports/demo_app                          # default: openai/gpt-oss-120b
+uv run sast-triage triage reports/demo_app --model llama-3.3-70b-versatile
+uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json
+```
+
+`evaluate` compares the verdicts with the answer key: real bugs kept,
+false alarms removed, precision, and end-to-end recall (which also counts
+bugs no scanner reported), next to the scanners-only baseline. If an LLM
+call fails, that candidate is kept as `needs_review` with the error noted.
+Code is passed to the model inside `<code>` tags and marked as untrusted, so
+instructions hidden in comments are not followed.
+
 ## CodeQL
 
 `scan` runs [CodeQL](https://codeql.github.com/) as a core scanner when it is
