@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from sast_triage import __version__, cache, detect, rules, targets
+from sast_triage import __version__, cache, dedupe, detect, rules, targets
 from sast_triage.scanners import bandit as bd
 from sast_triage.scanners import semgrep as sg
 
@@ -278,3 +278,95 @@ def bandit_baseline(
     _print_summary("Bandit", bd.summarize(output))
     console.print(f"Raw output saved to [bold]{out}[/]")
     console.print(f"{len(findings)} findings saved to [bold]{findings_out}[/]")
+
+
+@app.command()
+def scan(
+    target: TargetArg,
+    ref: RefOpt = None,
+    config: Annotated[
+        Optional[list[str]],
+        typer.Option("--config", "-c", help="Semgrep rules instead of automatic selection. Repeatable."),
+    ] = None,
+    out_dir: Annotated[
+        Optional[Path], typer.Option("--out-dir", help="Folder for this scan's files. Default: reports/<name>/")
+    ] = None,
+) -> None:
+    """Run all scanners, merge their findings into candidates, and save everything.
+
+    This is the pipeline up to triage: Semgrep (and Bandit for Python code),
+    conversion to Findings, then dedupe into one candidate per location.
+    """
+    resolved = _resolve(target, ref)
+    base_dir = resolved.path if resolved.path.is_dir() else resolved.path.parent
+    langs = detect.detect_languages(base_dir)
+    if config:
+        configs = config
+    else:
+        configs, langs = _auto_configs(resolved.path)
+
+    out_dir = out_dir or Path("reports") / resolved.name
+    findings = []
+    counts: dict[str, int] = {}
+
+    console.print(f"Running Semgrep on [bold]{resolved.source}[/] ...")
+    try:
+        sg_raw = sg.run_semgrep(resolved.path, configs)
+    except sg.SemgrepError as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(code=1) from None
+    _write_json(out_dir / "semgrep.json", sg_raw)
+    sg_shown, dropped = sg.security_only(sg_raw)
+    sg_findings = sg.to_findings(sg_shown, base_dir, configs)
+    findings += sg_findings
+    counts["semgrep"] = len(sg_findings)
+
+    if "python" in langs:
+        console.print("Running Bandit ...")
+        try:
+            bd_raw = bd.run_bandit(resolved.path)
+        except bd.BanditError as exc:
+            console.print(f"[red]Error:[/] {exc}")
+            raise typer.Exit(code=1) from None
+        _write_json(out_dir / "bandit.json", bd_raw)
+        bd_findings = bd.to_findings(bd_raw, base_dir)
+        findings += bd_findings
+        counts["bandit"] = len(bd_findings)
+
+    candidates = dedupe.group_findings(findings, base_dir)
+    _write_json(out_dir / "findings.json", [f.model_dump(mode="json") for f in findings])
+    _write_json(out_dir / "candidates.json", [c.model_dump(mode="json") for c in candidates])
+    _write_json(out_dir / "meta.json", {
+        "target": resolved.source,
+        "commit": resolved.commit,
+        "ref": ref,
+        "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "detected_languages": langs,
+        "semgrep_version": sg_raw.get("version"),
+        "semgrep_configs": config or "auto",
+        "rules_commit": None if config else rules.RULES_COMMIT,
+        "findings_per_scanner": counts,
+        "semgrep_code_quality_dropped": dropped,
+        "candidates": len(candidates),
+        "sast_triage_version": __version__,
+    })
+
+    per_scanner = ", ".join(f"{n} from {s}" for s, n in counts.items())
+    console.print(
+        f"\n[bold]{len(findings)}[/] findings ({per_scanner}) merged into "
+        f"[bold]{len(candidates)}[/] candidates"
+    )
+    table = Table(title_justify="left")
+    table.add_column("location")
+    table.add_column("cwe")
+    table.add_column("severity")
+    table.add_column("scanners")
+    table.add_column("findings", justify="right")
+    for cand in candidates:
+        lines = f"{cand.start_line}" if cand.start_line == cand.end_line else f"{cand.start_line}-{cand.end_line}"
+        table.add_row(
+            f"{cand.file}:{lines}", ", ".join(cand.cwe) or "-", cand.severity.value,
+            "+".join(cand.scanners), str(len(cand.findings)),
+        )
+    console.print(table)
+    console.print(f"Saved to [bold]{out_dir}/[/] (candidates.json, findings.json, raw outputs, meta.json)")

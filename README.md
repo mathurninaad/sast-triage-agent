@@ -13,6 +13,23 @@ uv sync
 uv run sast-triage version
 ```
 
+## Scan (all scanners + dedupe)
+
+```bash
+uv run sast-triage scan examples/demo_app
+uv run sast-triage scan https://github.com/adeyosemanputra/pygoat
+```
+
+Runs Semgrep (rules picked from the detected languages) and, for Python
+code, Bandit; converts everything into `Finding`s; then merges findings
+that point at the same place into **candidates**: same file, and either
+overlapping lines or at most 2 lines apart with a shared CWE. Each
+candidate keeps all its original findings. On the demo app, 32 findings
+become 12 candidates, each matching exactly one labelled item.
+
+Everything for one scan goes into `reports/<name>/`: `candidates.json`,
+`findings.json`, the raw `semgrep.json` / `bandit.json`, and `meta.json`.
+
 ## Semgrep baseline
 
 ```bash
