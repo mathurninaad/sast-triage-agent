@@ -53,6 +53,18 @@ uv run sast-triage triage reports/demo_app --model llama-3.3-70b-versatile
 uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json
 ```
 
+To compare two runs (for example after changing the prompt or the model),
+save them under different names:
+
+```bash
+uv run sast-triage triage reports/demo_app --out verdicts-llama.json --model llama-3.3-70b-versatile
+uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json --verdicts verdicts-llama.json
+```
+
+Bandit's "risky module imported" warnings (B401-B415) are dismissed by a
+fixed rule without calling the LLM: an import is never exploitable on its
+own, and each use of the module is flagged separately.
+
 `evaluate` compares the verdicts with the answer key: real bugs kept,
 false alarms removed, precision, and end-to-end recall (which also counts
 bugs no scanner reported), next to the scanners-only baseline. If an LLM

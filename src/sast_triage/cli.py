@@ -448,6 +448,9 @@ ScanDirArg = Annotated[Path, typer.Argument(help="A scan output folder, e.g. rep
 def triage_cmd(
     scan_dir: ScanDirArg,
     model: Annotated[str, typer.Option(help="Groq model ID.")] = triage.DEFAULT_MODEL,
+    out: Annotated[
+        str, typer.Option(help="File name for the verdicts, inside the scan folder.")
+    ] = "verdicts.json",
 ) -> None:
     """Ask an LLM for a verdict on each candidate (single-shot baseline, no tools)."""
     candidates, source_root = _load_scan(scan_dir)
@@ -462,9 +465,9 @@ def triage_cmd(
         for i, cand in enumerate(candidates, 1):
             status.update(f"Triaging {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
             verdicts.append(triage.triage_candidate(cand, source_root, judge, model))
-    _write_json(scan_dir / "verdicts.json", [v.model_dump(mode="json") for v in verdicts])
+    _write_json(scan_dir / out, [v.model_dump(mode="json") for v in verdicts])
 
-    table = Table(title=f"Verdicts ({model})", title_justify="left")
+    table = Table(title=f"Verdicts ({model}, prompt {triage.PROMPT_VERSION})", title_justify="left")
     for col in ("location", "verdict", "conf", "reasoning"):
         table.add_column(col)
     colours = {"true_positive": "red", "false_positive": "green", "needs_review": "yellow"}
@@ -474,23 +477,26 @@ def triage_cmd(
             f"{v.file}:{lines}",
             f"[{colours[v.verdict]}]{v.verdict}[/]",
             f"{v.confidence:.2f}",
-            (v.error or v.reasoning)[:120],
+            (v.error or (f"missing: {v.missing_context}" if v.verdict == "needs_review" and v.missing_context else v.reasoning))[:120],
         )
     console.print(table)
     errors = sum(1 for v in verdicts if v.error)
     if errors:
         console.print(f"[yellow]{errors} candidates could not be triaged (kept as needs_review).[/]")
-    console.print(f"Saved to [bold]{scan_dir / 'verdicts.json'}[/]")
+    console.print(f"Saved to [bold]{scan_dir / out}[/]")
 
 
 @app.command("evaluate")
 def evaluate_cmd(
     scan_dir: ScanDirArg,
     labels: Annotated[Path, typer.Option(help="Ground-truth label file.")],
+    verdicts_name: Annotated[
+        str, typer.Option("--verdicts", help="Verdicts file inside the scan folder.")
+    ] = "verdicts.json",
 ) -> None:
     """Score a scan's verdicts against ground-truth labels."""
     candidates, _ = _load_scan(scan_dir)
-    verdict_file = scan_dir / "verdicts.json"
+    verdict_file = scan_dir / verdicts_name
     verdicts = (
         [triage.Verdict.model_validate(v) for v in json.loads(verdict_file.read_text())]
         if verdict_file.exists() else []
