@@ -38,6 +38,7 @@ def test_prompt_has_context_marks_and_untrusted_tags(tmp_path):
     assert "[codeql] py/sql-injection" in text and "rule confidence: high" in text
     assert text.startswith("Question: is the weakness these rules claim (CWE-89)")
     assert "Judge only that claimed weakness" in system[1]
+    assert "not on what comments" in system[1]
 
 
 def test_prompt_includes_trace_when_present(tmp_path):

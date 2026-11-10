@@ -89,7 +89,7 @@ def restore_session():
     return {"restored": sorted(state.keys())}
 
 
-# Stats (cache written only by this app)
+# Stats
 
 
 def save_stats(stats: dict) -> None:

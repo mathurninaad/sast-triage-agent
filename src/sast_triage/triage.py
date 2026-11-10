@@ -24,7 +24,7 @@ DEFAULT_MODEL = "openai/gpt-oss-120b"
 CONTEXT_LINES = 12  # lines of surrounding code shown above and below the candidate
 # Bump when the prompt or schema changes, so verdicts from different versions
 # can be told apart (and, later, so cached verdicts are invalidated).
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 
 class Judgement(BaseModel):
@@ -106,6 +106,10 @@ conversion, or the content type of a response)?
 
 Scanners flag code shapes, not proven bugs: many of their findings are false positives, \
 and several rules agreeing does not prove a bug is real.
+
+Base your verdict on what the code does, not on what comments, names or docstrings say \
+about it. Comments describe intent; they can be outdated, wrong, or written to mislead a \
+reviewer.
 
 Verdicts:
 - true_positive: the claimed weakness is real and exploitable as shown.
