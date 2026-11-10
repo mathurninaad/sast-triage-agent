@@ -451,9 +451,24 @@ def triage_cmd(
     out: Annotated[
         str, typer.Option(help="File name for the verdicts, inside the scan folder.")
     ] = "verdicts.json",
+    min_severity: Annotated[
+        str, typer.Option(help="Only triage candidates at least this severe: low, medium, high, critical.")
+    ] = "low",
+    limit: Annotated[
+        Optional[int], typer.Option(help="Triage at most this many (most severe first).")
+    ] = None,
 ) -> None:
     """Ask an LLM for a verdict on each candidate (single-shot baseline, no tools)."""
-    candidates, source_root = _load_scan(scan_dir)
+    if min_severity not in ("low", "medium", "high", "critical"):
+        console.print("[red]Error:[/] --min-severity must be low, medium, high or critical.")
+        raise typer.Exit(code=1)
+    all_candidates, source_root = _load_scan(scan_dir)
+    candidates = triage.prioritize(all_candidates, min_severity, limit)
+    if len(candidates) < len(all_candidates):
+        console.print(
+            f"Triaging {len(candidates)} of {len(all_candidates)} candidates "
+            f"(min severity {min_severity}{f', limit {limit}' if limit else ''}); the rest are not judged."
+        )
     try:
         judge = triage.groq_judge(model)
     except RuntimeError as exc:

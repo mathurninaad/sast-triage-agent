@@ -228,6 +228,20 @@ def triage_candidate(candidate: Candidate, base_dir: Path, judge: Judge, model: 
     return Verdict(**judgement.model_dump(), model=model, **meta)
 
 
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def prioritize(
+    candidates: list[Candidate], min_severity: str = "low", limit: int | None = None
+) -> list[Candidate]:
+    """The candidates to triage first: most severe first, then those the most
+    scanners agree on. Used to stay within LLM rate limits on big repos."""
+    floor = _SEVERITY_RANK[min_severity]
+    chosen = [c for c in candidates if _SEVERITY_RANK[c.severity.value] >= floor]
+    chosen.sort(key=lambda c: (-_SEVERITY_RANK[c.severity.value], -len(c.scanners), c.file, c.start_line))
+    return chosen[:limit] if limit is not None else chosen
+
+
 def groq_judge(model: str = DEFAULT_MODEL) -> Judge:
     """A judge backed by a Groq-hosted model through LangChain.
 
@@ -240,7 +254,8 @@ def groq_judge(model: str = DEFAULT_MODEL) -> Judge:
         )
     from langchain_groq import ChatGroq  # imported here so tests don't need it
 
-    llm = ChatGroq(model=model, temperature=0, max_retries=3)
+    # Retries back off and wait, which absorbs short rate-limit (HTTP 429) pauses.
+    llm = ChatGroq(model=model, temperature=0, max_retries=6)
     structured = llm.with_structured_output(Judgement)
 
     def judge(messages: list[Message]) -> Judgement:

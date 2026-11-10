@@ -111,3 +111,16 @@ def test_old_verdict_files_still_load():
            "fix": None, "error": None}
     v = triage.Verdict.model_validate(old)
     assert v.prompt_version == "v1" and v.missing_context is None
+
+
+def _cand(cid, severity, scanners=("semgrep",), line=1):
+    return Candidate(id=cid, file="a.py", start_line=line, end_line=line, snippet="",
+                     severity=severity, scanners=list(scanners), findings=[])
+
+
+def test_prioritize_orders_and_filters():
+    cands = [_cand("low", "low"), _cand("hi1", "high"), _cand("crit", "critical"),
+             _cand("hi3", "high", ("bandit", "codeql", "semgrep")), _cand("med", "medium")]
+    assert [c.id for c in triage.prioritize(cands)] == ["crit", "hi3", "hi1", "med", "low"]
+    assert [c.id for c in triage.prioritize(cands, min_severity="high")] == ["crit", "hi3", "hi1"]
+    assert [c.id for c in triage.prioritize(cands, limit=2)] == ["crit", "hi3"]

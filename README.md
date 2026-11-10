@@ -61,6 +61,16 @@ uv run sast-triage triage reports/demo_app --out verdicts-llama.json --model lla
 uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json --verdicts verdicts-llama.json
 ```
 
+On big repos, LLM rate limits matter (Groq's free tier allows about 8,000
+tokens a minute and 200,000 a day for gpt-oss-120b, and one candidate uses
+roughly 2,000-3,000). Triage the most important candidates first:
+
+```bash
+uv run sast-triage triage reports/pygoat --min-severity high --limit 25
+```
+
+Candidates are ordered by severity, then by how many scanners agree.
+
 Bandit's "risky module imported" warnings (B401-B415) are dismissed by a
 fixed rule without calling the LLM: an import is never exploitable on its
 own, and each use of the module is flagged separately.
