@@ -30,6 +30,35 @@ become 12 candidates, each matching exactly one labelled item.
 Everything for one scan goes into `reports/<name>/`: `candidates.json`,
 `findings.json`, the raw `semgrep.json` / `bandit.json`, and `meta.json`.
 
+## CodeQL
+
+`scan` runs [CodeQL](https://codeql.github.com/) as a core scanner when it is
+installed. It is the only scanner here that tracks data across functions and
+files, and each of its findings carries a source-to-sink `trace`. On the demo
+app it is the only one that finds the path traversal.
+
+CodeQL is **not bundled**; install it yourself (the bundle includes the queries):
+
+```bash
+curl -LO https://github.com/github/codeql-action/releases/latest/download/codeql-bundle-osx64.tar.gz
+mkdir -p ~/tools && tar -xzf codeql-bundle-osx64.tar.gz -C ~/tools
+export PATH="$HOME/tools/codeql:$PATH"   # or: export SAST_TRIAGE_CODEQL=~/tools/codeql/codeql
+codeql version
+```
+
+(Use `codeql-bundle-linux64.tar.gz` on Linux.) If CodeQL isn't found, `scan`
+says so and continues with the other scanners.
+
+**Licence:** CodeQL's terms allow analysing open-source code, academic research
+and demos. Analysing private or commercial code needs a paid GitHub Advanced
+Security licence. `scan` prints this reminder on every run; use `--no-codeql`
+to skip it.
+
+Only languages CodeQL can analyse **without building the project** are used:
+Python, JavaScript/TypeScript, Ruby, Java and C#. Others (C/C++, Go, Kotlin,
+Swift) would mean running the project's own build scripts, which this tool
+never does, so they are skipped with a message.
+
 ## Semgrep baseline
 
 ```bash

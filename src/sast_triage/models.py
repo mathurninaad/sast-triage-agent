@@ -29,6 +29,15 @@ class Location(BaseModel):
     end_col: int | None = None
 
 
+class TraceStep(BaseModel):
+    """One step of a source-to-sink data flow, as reported by the scanner."""
+
+    file: str
+    line: int = Field(ge=1)
+    code: str = Field(default="", description="That line of code, read from the file")
+    note: str = Field(default="", description="The scanner's label for this step, if any")
+
+
 class Finding(BaseModel):
     """One suspicious location reported by one scanner rule."""
 
@@ -49,6 +58,10 @@ class Finding(BaseModel):
     impact: str | None = None
     owasp: list[str] = Field(default_factory=list)
     references: list[str] = Field(default_factory=list)
+
+    # How untrusted data reaches this spot, from source to sink. Only scanners
+    # that track data across functions and files (CodeQL) fill this in.
+    trace: list[TraceStep] = Field(default_factory=list)
 
     @property
     def rule_name(self) -> str:
