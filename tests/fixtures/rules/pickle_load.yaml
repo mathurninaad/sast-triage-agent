@@ -1,0 +1,13 @@
+# Written for this project's tests (not derived from any Semgrep registry rule).
+# It only needs to hit known lines in examples/demo_app so we can check
+# that run_semgrep works end to end without downloading any rules.
+rules:
+- id: sast-triage-test-pickle-load
+  languages: [python]
+  severity: WARNING
+  message: pickle.load/pickle.loads call found (sast-triage test rule).
+  metadata:
+    cwe: ["CWE-502: Deserialization of Untrusted Data"]
+  pattern-either:
+    - pattern: pickle.loads(...)
+    - pattern: pickle.load(...)

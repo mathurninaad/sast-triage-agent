@@ -1,0 +1,58 @@
+{
+  "version": "1.183.0",
+  "results": [
+    {
+      "check_id": "python.lang.security.audit.formatted-sql-query",
+      "path": "db.py",
+      "start": {"line": 16, "col": 12, "offset": 351},
+      "end": {"line": 16, "col": 31, "offset": 370},
+      "extra": {
+        "message": "Detected possible formatted SQL query.",
+        "metadata": {
+          "cwe": ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"],
+          "subcategory": ["audit"],
+          "confidence": "LOW"
+        },
+        "severity": "WARNING",
+        "fingerprint": "requires login",
+        "lines": "requires login",
+        "engine_kind": "OSS"
+      }
+    },
+    {
+      "check_id": "python.lang.security.deserialization.pickle.avoid-pickle",
+      "path": "app.py",
+      "start": {"line": 88, "col": 13, "offset": 2001},
+      "end": {"line": 88, "col": 46, "offset": 2034},
+      "extra": {
+        "message": "Avoid using pickle.",
+        "metadata": {
+          "cwe": ["CWE-502: Deserialization of Untrusted Data"],
+          "subcategory": ["audit"],
+          "confidence": "LOW"
+        },
+        "severity": "WARNING",
+        "engine_kind": "OSS"
+      }
+    },
+    {
+      "check_id": "python.flask.security.insecure-deserialization.insecure-deserialization",
+      "path": "app.py",
+      "start": {"line": 88, "col": 13, "offset": 2001},
+      "end": {"line": 88, "col": 46, "offset": 2034},
+      "extra": {
+        "message": "Detected the use of an insecure deserialization library in a Flask route.",
+        "metadata": {
+          "cwe": "CWE-502: Deserialization of Untrusted Data",
+          "subcategory": ["vuln"],
+          "confidence": "MEDIUM"
+        },
+        "severity": "ERROR",
+        "engine_kind": "OSS"
+      }
+    }
+  ],
+  "errors": [],
+  "paths": {"scanned": ["app.py", "db.py"]},
+  "skipped_rules": []
+}
