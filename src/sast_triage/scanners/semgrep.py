@@ -137,7 +137,7 @@ def _first(value: Any, default: str = "unknown") -> str:
 def summarize(output: dict[str, Any]) -> dict[str, Any]:
     """Count results along the dimensions we care about for triage."""
     results = output.get("results", [])
-    by = {key: Counter() for key in ("rule", "file", "severity", "subcategory", "confidence", "cwe")}
+    by = {key: Counter() for key in ("severity", "subcategory", "confidence", "cwe", "rule", "file")}
     for r in results:
         meta = r.get("extra", {}).get("metadata", {})
         by["rule"][short_rule_id(r["check_id"])] += 1

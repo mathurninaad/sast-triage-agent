@@ -51,6 +51,19 @@ v1.0, which does not allow redistributing them, so they are never copied into
 this repository. The summary leaves out code-quality results (correctness, maintainability, best-practice); the raw JSON in
 `reports/` is Semgrep's full output.
 
+## Bandit baseline
+
+[Bandit](https://bandit.readthedocs.io/) is a Python-only security linter.
+It overlaps with Semgrep but catches some things Semgrep's rules don't.
+
+```bash
+uv run sast-triage bandit examples/demo_app
+uv run sast-triage bandit https://github.com/adeyosemanputra/pygoat
+```
+
+It writes `reports/bandit-<name>.json` (raw), a `.meta.json`, and
+`reports/findings-bandit-<name>.json` in the same `Finding` format as Semgrep.
+
 ## Download cache
 
 Downloaded rules and repos are kept between runs (nothing removes them

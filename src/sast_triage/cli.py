@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from sast_triage import __version__, cache, detect, rules, targets
+from sast_triage.scanners import bandit as bd
 from sast_triage.scanners import semgrep as sg
 
 app = typer.Typer(
@@ -96,6 +97,28 @@ def _auto_configs(target: Path) -> tuple[list[str], list[str]]:
     return [str(d) for d in dirs], langs
 
 
+def _print_summary(scanner: str, summary: dict) -> None:
+    """Headline counts plus one table per dimension in summary["by"]."""
+    version = f" {summary['version']}" if summary.get("version") else ""
+    console.print(
+        f"\n{scanner}{version}: [bold]{summary['results']}[/] results at "
+        f"{summary['unique_locations']} unique locations, {summary['files_scanned']} files "
+        f"scanned, {summary['errors']} errors, {summary['skipped_rules']} skipped rules"
+    )
+    for key, counts in summary["by"].items():
+        table = Table(title=f"By {key}", title_justify="left")
+        table.add_column(key)
+        table.add_column("count", justify="right")
+        for name, count in list(counts.items())[:15]:
+            table.add_row(name, str(count))
+        console.print(table)
+
+
+def _write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
 @app.command("semgrep")
 def semgrep_baseline(
     target: TargetArg,
@@ -160,23 +183,11 @@ def semgrep_baseline(
         json.dumps([f.model_dump(mode="json") for f in findings], indent=2)
     )
 
-    summary = sg.summarize(shown)
-    console.print(
-        f"\nSemgrep {summary['version']}: [bold]{summary['results']}[/] results at "
-        f"{summary['unique_locations']} unique locations, {summary['files_scanned']} files "
-        f"scanned, {summary['errors']} errors, {summary['skipped_rules']} skipped rules"
-    )
+    _print_summary("Semgrep", sg.summarize(shown))
     if dropped:
         console.print(
             f"({dropped} code-quality results left out; use --all-categories to include them)"
         )
-    for key in ("severity", "subcategory", "confidence", "cwe", "rule", "file"):
-        table = Table(title=f"By {key}", title_justify="left")
-        table.add_column(key)
-        table.add_column("count", justify="right")
-        for name, count in list(summary["by"][key].items())[:15]:
-            table.add_row(name, str(count))
-        console.print(table)
     console.print(f"Raw output saved to [bold]{out}[/]")
     console.print(f"{len(findings)} findings saved to [bold]{findings_out}[/]")
 
@@ -228,3 +239,42 @@ def cache_clear(
         raise typer.Exit()
     freed = cache.clear(root, repos=clear_repos, rules=clear_rules)
     console.print(f"Freed {cache.human_size(freed)}.")
+
+
+@app.command("bandit")
+def bandit_baseline(
+    target: TargetArg,
+    ref: RefOpt = None,
+    out: Annotated[
+        Optional[Path], typer.Option(help="Where to save the raw JSON output.")
+    ] = None,
+) -> None:
+    """Baseline: run Bandit (Python only) alone, save its output and summarise it."""
+    resolved = _resolve(target, ref)
+    console.print(f"Running Bandit on [bold]{resolved.source}[/] ...")
+    try:
+        output = bd.run_bandit(resolved.path)
+    except bd.BanditError as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(code=1) from None
+
+    out = out or Path("reports") / f"bandit-{resolved.name}.json"
+    _write_json(out, output)
+    _write_json(out.with_suffix(".meta.json"), {
+        "target": resolved.source,
+        "commit": resolved.commit,
+        "ref": ref,
+        "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "scanner": "bandit",
+        "sast_triage_version": __version__,
+    })
+    base_dir = resolved.path if resolved.path.is_dir() else resolved.path.parent
+    findings = bd.to_findings(output, base_dir)
+    findings_out = out.with_name(out.name.replace("bandit-", "findings-bandit-", 1))
+    if findings_out == out:
+        findings_out = out.with_suffix(".findings.json")
+    _write_json(findings_out, [f.model_dump(mode="json") for f in findings])
+
+    _print_summary("Bandit", bd.summarize(output))
+    console.print(f"Raw output saved to [bold]{out}[/]")
+    console.print(f"{len(findings)} findings saved to [bold]{findings_out}[/]")
