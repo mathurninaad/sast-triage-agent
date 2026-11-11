@@ -47,3 +47,18 @@ def test_run_semgrep_on_demo_app_with_local_rule():
     output = sg.run_semgrep(DEMO_APP, [str(FIXTURES / "rules" / "pickle_load.yaml")])
     hits = sorted((r["path"], r["start"]["line"]) for r in output["results"])
     assert hits == [("app.py", 88), ("app.py", 105)]
+
+
+def test_security_only():
+    output = {
+        "results": [
+            {"extra": {"metadata": {"category": "security"}}},
+            {"extra": {"metadata": {"category": "maintainability"}}},
+            {"extra": {"metadata": {}}},
+        ],
+        "version": "x",
+    }
+    kept, dropped = sg.security_only(output)
+    assert len(kept["results"]) == 1 and dropped == 2
+    assert kept["version"] == "x"            # other keys are kept
+    assert len(output["results"]) == 3       # the original isn't modified
