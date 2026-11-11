@@ -25,3 +25,8 @@ reports/
 
 # Cloned third-party evaluation targets (see eval/targets/README.md)
 eval/targets/*/
+
+# CodeQL downloads, if extracted or saved inside the project
+codeql-bundle-*.tar.gz
+codeql-bundle-*.tar.zst
+/codeql/

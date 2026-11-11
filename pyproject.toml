@@ -6,7 +6,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "bandit>=1.7",
+    "langchain-core>=0.3",
+    "langchain-groq>=0.3",
     "pydantic>=2.7",
+    "python-dotenv>=1.0",
     "semgrep>=1.140",
     "typer>=0.12",
 ]

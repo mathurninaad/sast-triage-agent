@@ -10,7 +10,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from sast_triage import __version__, cache, dedupe, detect, rules, targets
+from dotenv import load_dotenv
+
+from sast_triage import __version__, cache, dedupe, detect, evaluate, rules, targets, triage
+from sast_triage.models import Candidate
 from sast_triage.scanners import bandit as bd
 from sast_triage.scanners import codeql as cq
 from sast_triage.scanners import semgrep as sg
@@ -28,6 +31,7 @@ app.add_typer(cache_app, name="cache")
 @app.callback()
 def main() -> None:
     """Keeps `sast-triage` as a command group so more commands can be added later."""
+    load_dotenv()  # read API keys from a .env file in the current folder, if there is one
 
 
 @app.command()
@@ -389,6 +393,7 @@ def scan(
         "target": resolved.source,
         "commit": resolved.commit,
         "ref": ref,
+        "source_root": str(base_dir.resolve()),
         "scanned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "detected_languages": langs,
         "semgrep_version": sg_raw.get("version"),
@@ -420,3 +425,114 @@ def scan(
         )
     console.print(table)
     console.print(f"Saved to [bold]{out_dir}/[/] (candidates.json, findings.json, raw outputs, meta.json)")
+
+
+def _load_scan(scan_dir: Path) -> tuple[list[Candidate], Path]:
+    """Candidates from a `scan` output folder, and the folder their code lives in."""
+    cand_file, meta_file = scan_dir / "candidates.json", scan_dir / "meta.json"
+    if not cand_file.exists() or not meta_file.exists():
+        console.print(f"[red]Error:[/] {scan_dir} has no candidates.json/meta.json; run `sast-triage scan` first.")
+        raise typer.Exit(code=1)
+    candidates = [Candidate.model_validate(c) for c in json.loads(cand_file.read_text())]
+    source_root = Path(json.loads(meta_file.read_text()).get("source_root", ""))
+    if not source_root.is_dir():
+        console.print(f"[red]Error:[/] the scanned code is no longer at {source_root}; scan again.")
+        raise typer.Exit(code=1)
+    return candidates, source_root
+
+
+ScanDirArg = Annotated[Path, typer.Argument(help="A scan output folder, e.g. reports/demo_app")]
+
+
+@app.command("triage")
+def triage_cmd(
+    scan_dir: ScanDirArg,
+    model: Annotated[str, typer.Option(help="Groq model ID.")] = triage.DEFAULT_MODEL,
+) -> None:
+    """Ask an LLM for a verdict on each candidate (single-shot baseline, no tools)."""
+    candidates, source_root = _load_scan(scan_dir)
+    try:
+        judge = triage.groq_judge(model)
+    except RuntimeError as exc:
+        console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(code=1) from None
+
+    verdicts = []
+    with console.status("Triaging...") as status:
+        for i, cand in enumerate(candidates, 1):
+            status.update(f"Triaging {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
+            verdicts.append(triage.triage_candidate(cand, source_root, judge, model))
+    _write_json(scan_dir / "verdicts.json", [v.model_dump(mode="json") for v in verdicts])
+
+    table = Table(title=f"Verdicts ({model})", title_justify="left")
+    for col in ("location", "verdict", "conf", "reasoning"):
+        table.add_column(col)
+    colours = {"true_positive": "red", "false_positive": "green", "needs_review": "yellow"}
+    for v in verdicts:
+        lines = f"{v.start_line}" if v.start_line == v.end_line else f"{v.start_line}-{v.end_line}"
+        table.add_row(
+            f"{v.file}:{lines}",
+            f"[{colours[v.verdict]}]{v.verdict}[/]",
+            f"{v.confidence:.2f}",
+            (v.error or v.reasoning)[:120],
+        )
+    console.print(table)
+    errors = sum(1 for v in verdicts if v.error)
+    if errors:
+        console.print(f"[yellow]{errors} candidates could not be triaged (kept as needs_review).[/]")
+    console.print(f"Saved to [bold]{scan_dir / 'verdicts.json'}[/]")
+
+
+@app.command("evaluate")
+def evaluate_cmd(
+    scan_dir: ScanDirArg,
+    labels: Annotated[Path, typer.Option(help="Ground-truth label file.")],
+) -> None:
+    """Score a scan's verdicts against ground-truth labels."""
+    candidates, _ = _load_scan(scan_dir)
+    verdict_file = scan_dir / "verdicts.json"
+    verdicts = (
+        [triage.Verdict.model_validate(v) for v in json.loads(verdict_file.read_text())]
+        if verdict_file.exists() else []
+    )
+    if not verdicts:
+        console.print("[yellow]No verdicts.json yet: showing the scanners-only baseline.[/]")
+    result = evaluate.evaluate(candidates, verdicts, evaluate.load_labels(labels))
+
+    table = Table(title_justify="left")
+    for col in ("location", "label", "truth", "verdict", ""):
+        table.add_column(col)
+    for r in result["rows"]:
+        c = r.candidate
+        lines = f"{c.start_line}" if c.start_line == c.end_line else f"{c.start_line}-{c.end_line}"
+        mark = {True: "[green]ok[/]", False: "[red]wrong[/]", None: ""}[r.correct]
+        table.add_row(
+            f"{c.file}:{lines}", r.label["id"] if r.label else "-", r.truth,
+            r.verdict.verdict if r.verdict else "-", mark,
+        )
+    console.print(table)
+
+    summary = Table(title="Scores", title_justify="left")
+    summary.add_column("metric")
+    summary.add_column("scanners only", justify="right")
+    if verdicts:
+        summary.add_column("after triage", justify="right")
+    base, tri = result["baseline"], result["triage"]
+    rows = [
+        ("candidates shown to user", "candidates_kept"),
+        ("real bugs kept (of those scanned)", None),
+        ("recall, end to end", "recall_end_to_end"),
+        ("false alarms removed", "false_alarms_removed"),
+        ("precision", "precision"),
+    ]
+    for name, key in rows:
+        if key is None:
+            vals = [f"{m['real_kept']}/{m['real_candidates']}" for m in (base, tri)]
+        else:
+            vals = ["-" if m[key] is None else str(m[key]) for m in (base, tri)]
+        summary.add_row(name, *(vals if verdicts else vals[:1]))
+    console.print(summary)
+    if result["missed_by_scanners"]:
+        console.print(f"Missed by every scanner (triage can't recover these): {', '.join(result['missed_by_scanners'])}")
+    if result["needs_review"]:
+        console.print(f"{result['needs_review']} candidates marked needs_review (kept for a human).")
