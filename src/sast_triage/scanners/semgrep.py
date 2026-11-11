@@ -89,17 +89,24 @@ def run_semgrep(
 # Helpers for reading individual results
 
 
-def is_security(result: dict[str, Any]) -> bool:
-    """True if the rule that produced this result is a security rule.
+# Rule categories that are about code quality, not vulnerabilities.
+NON_SECURITY_CATEGORIES = frozenset(
+    {"correctness", "maintainability", "best-practice", "performance", "portability", "compatibility"}
+)
 
-    The rules repo also has correctness, maintainability and best-practice
-    rules (code quality, not vulnerabilities); those are filtered out.
+
+def is_security(result: dict[str, Any]) -> bool:
+    """False only if the rule says it's about code quality, not security.
+
+    Rules without a category (common in custom rules) are kept: hiding a
+    possible vulnerability is worse than showing one extra result.
     """
-    return result.get("extra", {}).get("metadata", {}).get("category") == "security"
+    category = result.get("extra", {}).get("metadata", {}).get("category")
+    return category not in NON_SECURITY_CATEGORIES
 
 
 def security_only(output: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Copy of `output` keeping only security results, plus how many were dropped."""
+    """Copy of `output` without code-quality results, plus how many were dropped."""
     results = output.get("results", [])
     kept = [r for r in results if is_security(r)]
     return {**output, "results": kept}, len(results) - len(kept)

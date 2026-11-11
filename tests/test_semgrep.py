@@ -59,6 +59,7 @@ def test_security_only():
         "version": "x",
     }
     kept, dropped = sg.security_only(output)
-    assert len(kept["results"]) == 1 and dropped == 2
+    # security kept, maintainability dropped, no category kept (could be a custom rule)
+    assert len(kept["results"]) == 2 and dropped == 1
     assert kept["version"] == "x"            # other keys are kept
     assert len(output["results"]) == 3       # the original isn't modified

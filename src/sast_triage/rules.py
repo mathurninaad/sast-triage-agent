@@ -9,9 +9,9 @@ from Semgrep's repo, pinned to one commit, into a cache folder.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from pathlib import Path
+
+from sast_triage import fetch
 
 RULES_REPO = "https://github.com/semgrep/semgrep-rules.git"
 # Pinned so every scan uses the same rules; bump deliberately.
@@ -23,46 +23,31 @@ LANGUAGE_RULE_DIRS: dict[str, tuple[str, ...]] = {
     "typescript": ("typescript", "javascript"),
 }
 
-_COMPLETE_MARKER = ".sast-triage-complete"
-
 
 class RulesError(RuntimeError):
     """The rules could not be downloaded."""
 
 
 def default_cache_dir() -> Path:
-    """Where downloaded rules live: $SAST_TRIAGE_CACHE, else ~/.cache/sast-triage."""
+    """Where downloads live: $SAST_TRIAGE_CACHE, else ~/.cache/sast-triage."""
     if custom := os.environ.get("SAST_TRIAGE_CACHE"):
         return Path(custom)
     base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
     return Path(base) / "sast-triage"
 
 
-def _git(*args: str, cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True, timeout=600)
-
-
 def ensure_rules(cache_dir: Path | None = None, commit: str = RULES_COMMIT) -> Path:
     """Return the local rules folder, downloading it first if needed.
 
-    Only the pinned commit is fetched (no history). A marker file is written
-    last, so a download that was interrupted is detected and redone.
+    A pinned commit never changes, so once downloaded it is reused as-is.
     """
     dest = (cache_dir or default_cache_dir()) / "semgrep-rules" / commit[:12]
-    if (dest / _COMPLETE_MARKER).exists():
+    if fetch.is_complete(dest):
         return dest
-    if dest.exists():
-        shutil.rmtree(dest)  # leftover from an interrupted download
-    dest.mkdir(parents=True)
     try:
-        _git("init", "--quiet", cwd=dest)
-        _git("fetch", "--quiet", "--depth", "1", RULES_REPO, commit, cwd=dest)
-        _git("checkout", "--quiet", "FETCH_HEAD", cwd=dest)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        shutil.rmtree(dest, ignore_errors=True)
-        detail = getattr(exc, "stderr", "") or str(exc)
-        raise RulesError(f"could not download Semgrep rules: {detail.strip()}") from None
-    (dest / _COMPLETE_MARKER).touch()
+        fetch.fetch_commit(RULES_REPO, dest, ref=commit)
+    except fetch.FetchError as exc:
+        raise RulesError(f"could not download Semgrep rules: {exc}") from None
     return dest
 
 
