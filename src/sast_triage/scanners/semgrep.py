@@ -16,6 +16,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from sast_triage.models import Finding, Location, Severity, fingerprint
+
 _CWE_RE = re.compile(r"CWE-\d+")
 
 
@@ -155,3 +157,114 @@ def summarize(output: dict[str, Any]) -> dict[str, Any]:
         "skipped_rules": len(output.get("skipped_rules", [])),
         "by": {key: dict(counter.most_common()) for key, counter in by.items()},
     }
+
+
+# Converting raw results into our Finding model
+
+_SEVERITY = {
+    "INFO": Severity.LOW,
+    "LOW": Severity.LOW,
+    "WARNING": Severity.MEDIUM,
+    "MEDIUM": Severity.MEDIUM,
+    "ERROR": Severity.HIGH,
+    "HIGH": Severity.HIGH,
+    "CRITICAL": Severity.CRITICAL,
+}
+
+
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+
+def _path_prefix(path: Path) -> str:
+    """How Semgrep turns a rules folder into a rule-ID prefix.
+
+    /Users/me/.cache/x  ->  'Users.me..cache.x.'
+    """
+    return str(path.resolve()).lstrip("/").replace("/", ".") + "."
+
+
+def clean_rule_id(check_id: str, configs: list[str] | tuple[str, ...]) -> str:
+    """Strip the machine-specific folder prefix Semgrep adds for local rules.
+
+    For rules loaded from a folder, Semgrep puts that folder's full path in
+    front of the rule ID, so the same rule would get a different ID on every
+    machine. Registry rules (p/python) have no prefix and are left alone.
+    """
+    for config in configs:
+        path = Path(config)
+        if not path.exists():
+            continue  # a registry name, not a local path
+        # Semgrep prefixes the full dotted path of each rule file's folder.
+        # Cutting at the config's parent keeps the meaningful part: for the
+        # rules folder <cache>/python that leaves "python.lang.security...",
+        # the same ID the registry uses.
+        prefix = _path_prefix(path.parent)
+        if check_id.startswith(prefix):
+            return check_id[len(prefix):]
+    return check_id
+
+
+def read_snippet(base_dir: Path, rel_path: str, start: int, end: int) -> str:
+    """Lines start..end (1-based, inclusive) of a scanned file, or '' if unreadable."""
+    try:
+        lines = (base_dir / rel_path).read_text(errors="replace").splitlines()
+    except OSError:
+        return ""
+    return "\n".join(lines[start - 1 : end])
+
+
+def to_findings(
+    output: dict[str, Any],
+    base_dir: Path,
+    configs: list[str] | tuple[str, ...],
+) -> list[Finding]:
+    """Convert Semgrep's raw output into Findings.
+
+    `base_dir` is the folder Semgrep ran in (result paths are relative to
+    it), used to read each snippet. `configs` are the --config values used,
+    needed to clean up rule IDs.
+    """
+    findings: list[Finding] = []
+    seen: dict[str, int] = {}
+    for r in output.get("results", []):
+        extra = r.get("extra", {})
+        meta = extra.get("metadata", {})
+        rule_id = clean_rule_id(r["check_id"], configs)
+        start, end = r["start"]["line"], r["end"]["line"]
+        snippet = read_snippet(base_dir, r["path"], start, end)
+
+        fp = fingerprint("semgrep", rule_id, r["path"], snippet)
+        # The same rule on two identical lines in one file: keep both, distinctly.
+        seen[fp] = seen.get(fp, 0) + 1
+        if seen[fp] > 1:
+            fp = f"{fp}-{seen[fp]}"
+
+        findings.append(
+            Finding(
+                fingerprint=fp,
+                scanner="semgrep",
+                rule_id=rule_id,
+                message=" ".join(str(extra.get("message", "")).split()),
+                severity=_SEVERITY.get(str(extra.get("severity", "")).upper(), Severity.MEDIUM),
+                cwe=cwe_ids(r),
+                location=Location(
+                    file=r["path"],
+                    start_line=start,
+                    end_line=end,
+                    start_col=r["start"].get("col"),
+                    end_col=r["end"].get("col"),
+                ),
+                snippet=snippet,
+                category=meta.get("category"),
+                subcategory=_first(meta.get("subcategory"), default="") or None,
+                confidence=_first(meta.get("confidence"), default="") or None,
+                likelihood=_first(meta.get("likelihood"), default="") or None,
+                impact=_first(meta.get("impact"), default="") or None,
+                owasp=_as_list(meta.get("owasp")),
+                references=_as_list(meta.get("references")),
+            )
+        )
+    return findings

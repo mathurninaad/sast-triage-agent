@@ -1286,6 +1286,7 @@ name = "sast-triage"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pydantic" },
     { name = "semgrep" },
     { name = "typer" },
 ]
@@ -1297,6 +1298,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pydantic", specifier = ">=2.7" },
     { name = "semgrep", specifier = ">=1.140" },
     { name = "typer", specifier = ">=0.12" },
 ]
