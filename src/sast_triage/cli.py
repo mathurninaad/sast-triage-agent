@@ -1,6 +1,7 @@
 """Command-line entry point: `sast-triage ...`."""
 
 import json
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
@@ -11,6 +12,7 @@ from rich.table import Table
 
 from sast_triage import __version__, cache, dedupe, detect, rules, targets
 from sast_triage.scanners import bandit as bd
+from sast_triage.scanners import codeql as cq
 from sast_triage.scanners import semgrep as sg
 
 app = typer.Typer(
@@ -280,6 +282,47 @@ def bandit_baseline(
     console.print(f"{len(findings)} findings saved to [bold]{findings_out}[/]")
 
 
+def _run_codeql_step(
+    base_dir: Path, langs: list[str], out_dir: Path, findings: list, counts: dict, skip: bool
+) -> str:
+    """Run CodeQL for the languages it can analyse without a build.
+
+    Appends to `findings` and `counts` in place; returns a status for meta.json.
+    """
+    if skip:
+        return "skipped (--no-codeql)"
+    run_langs, needs_build = cq.plan_languages(langs)
+    if needs_build:
+        console.print(
+            f"[yellow]CodeQL: skipping {', '.join(needs_build)}[/] (analysing it means "
+            "running the project's build scripts, which this tool never does)"
+        )
+    if not run_langs:
+        return "no supported languages"
+    if cq.codeql_executable() is None:
+        console.print(
+            "[yellow]CodeQL is not installed, so it was skipped.[/] It's the scanner that "
+            "traces data across files; see the README section 'CodeQL' to install it."
+        )
+        return "not installed"
+    console.print(f"Running CodeQL ({', '.join(run_langs)}) ...")
+    console.print(f"[dim]{cq.LICENSE_NOTICE}[/]")
+    try:
+        with tempfile.TemporaryDirectory(prefix="sast-triage-codeql-") as work:
+            sarifs = cq.run_codeql(base_dir, run_langs, Path(work))
+    except cq.CodeQLError as exc:
+        console.print(f"[red]CodeQL failed:[/] {exc}")
+        return "failed"
+    total = 0
+    for lang, sarif in sarifs.items():
+        _write_json(out_dir / f"codeql-{lang}.sarif", sarif)
+        cq_findings = cq.to_findings(sarif, base_dir)
+        findings += cq_findings
+        total += len(cq_findings)
+    counts["codeql"] = total
+    return f"ran: {', '.join(run_langs)}"
+
+
 @app.command()
 def scan(
     target: TargetArg,
@@ -291,11 +334,15 @@ def scan(
     out_dir: Annotated[
         Optional[Path], typer.Option("--out-dir", help="Folder for this scan's files. Default: reports/<name>/")
     ] = None,
+    no_codeql: Annotated[
+        bool, typer.Option("--no-codeql", help="Skip CodeQL (e.g. for private code; see its licence).")
+    ] = False,
 ) -> None:
     """Run all scanners, merge their findings into candidates, and save everything.
 
-    This is the pipeline up to triage: Semgrep (and Bandit for Python code),
-    conversion to Findings, then dedupe into one candidate per location.
+    This is the pipeline up to triage: Semgrep, Bandit (Python), CodeQL
+    (if installed), conversion to Findings, then dedupe into one candidate
+    per location.
     """
     resolved = _resolve(target, ref)
     base_dir = resolved.path if resolved.path.is_dir() else resolved.path.parent
@@ -333,6 +380,8 @@ def scan(
         findings += bd_findings
         counts["bandit"] = len(bd_findings)
 
+    codeql_status = _run_codeql_step(base_dir, langs, out_dir, findings, counts, skip=no_codeql)
+
     candidates = dedupe.group_findings(findings, base_dir)
     _write_json(out_dir / "findings.json", [f.model_dump(mode="json") for f in findings])
     _write_json(out_dir / "candidates.json", [c.model_dump(mode="json") for c in candidates])
@@ -346,6 +395,7 @@ def scan(
         "semgrep_configs": config or "auto",
         "rules_commit": None if config else rules.RULES_COMMIT,
         "findings_per_scanner": counts,
+        "codeql": codeql_status,
         "semgrep_code_quality_dropped": dropped,
         "candidates": len(candidates),
         "sast_triage_version": __version__,
