@@ -69,3 +69,33 @@ def fingerprint(scanner: str, rule_id: str, file: str, snippet: str) -> str:
     normalized = _WS.sub(" ", snippet).strip()
     data = "\x1f".join((scanner, rule_id, file, normalized))
     return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+
+_SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
+
+
+def max_severity(severities: list[Severity]) -> Severity:
+    """The most serious of several severities."""
+    return max(severities, key=_SEVERITY_ORDER.index)
+
+
+class Candidate(BaseModel):
+    """One suspicious location, merged from every finding that points at it.
+
+    This is the unit the triage agent will judge: one verdict per candidate,
+    however many rules or scanners flagged it.
+    """
+
+    id: str = Field(description="Hash of the member findings' fingerprints")
+    file: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    snippet: str
+    cwe: list[str] = Field(default_factory=list, description="Union of the members' CWEs")
+    severity: Severity = Field(description="Most serious severity among the members")
+    scanners: list[str]
+    findings: list[Finding]
+
+    @property
+    def rules(self) -> list[str]:
+        return sorted({f.rule_id for f in self.findings})
