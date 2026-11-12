@@ -80,6 +80,9 @@ class Verdict(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     exploit_scenario: str | None = None
     fix: str | None = None
+    tool_calls: list[str] = Field(
+        default_factory=list, description="Tools the agent called, in order (agent triage only)"
+    )
     error: str | None = Field(default=None, description="Set if the LLM call failed")
 
 
