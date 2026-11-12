@@ -108,6 +108,49 @@ They only read, every path must resolve inside the repository (no `..`,
 absolute paths or symlinks leading out), dependency folders are invisible,
 and output is capped so one call can't flood the model's context.
 
+## MCP server
+
+The same six tools are served over the [Model Context Protocol](https://modelcontextprotocol.io/),
+so any MCP client (the triage agent, Claude Desktop, Cursor, the MCP Inspector) can use them.
+Each server is locked to one repository, chosen when it starts:
+
+```bash
+uv run sast-triage mcp-server examples/demo_app                      # stdio (what desktop clients launch)
+uv run sast-triage mcp-server https://github.com/owner/repo          # a GitHub repo, fetched first
+uv run sast-triage mcp-server examples/demo_app --transport http     # http://127.0.0.1:8765/mcp
+```
+
+The HTTP transport listens on 127.0.0.1 only. With stdio, standard output
+carries the protocol, so the command writes its own messages to stderr.
+
+**Try it in the MCP Inspector** (a browser UI for calling MCP tools; needs Node.js):
+
+```bash
+npx @modelcontextprotocol/inspector uv run sast-triage mcp-server examples/demo_app
+```
+
+**Use it from Claude Desktop:** add this to
+`~/Library/Application Support/Claude/claude_desktop_config.json`, then restart
+Claude Desktop. Desktop apps don't see your shell's PATH, so use the full
+path to `uv` (from `which uv`) and to the project:
+
+```json
+{
+  "mcpServers": {
+    "sast-triage": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": ["--directory", "/Users/you/PycharmProjects/SAST",
+               "run", "sast-triage", "mcp-server", "examples/demo_app"]
+    }
+  }
+}
+```
+
+Every tool is marked read-only in its MCP metadata, path and output limits
+apply as above, bad requests come back as tool errors (the server keeps
+running), and the server's instructions tell clients that repository content
+is untrusted data.
+
 ## CodeQL
 
 `scan` runs [CodeQL](https://codeql.github.com/) as a core scanner when it is
