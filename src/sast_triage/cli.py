@@ -1,6 +1,7 @@
 """Command-line entry point: `sast-triage ...`."""
 
 import json
+import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -451,16 +452,24 @@ def triage_cmd(
     scan_dir: ScanDirArg,
     model: Annotated[str, typer.Option(help="Groq model ID.")] = triage.DEFAULT_MODEL,
     out: Annotated[
-        str, typer.Option(help="File name for the verdicts, inside the scan folder.")
-    ] = "verdicts.json",
+        Optional[str], typer.Option(help="File name for the verdicts, inside the scan folder. "
+                                    "Default: verdicts.json, or verdicts-agent.json with --agent.")
+    ] = None,
     min_severity: Annotated[
         str, typer.Option(help="Only triage candidates at least this severe: low, medium, high, critical.")
     ] = "low",
     limit: Annotated[
         Optional[int], typer.Option(help="Triage at most this many (most severe first).")
     ] = None,
+    use_agent: Annotated[
+        bool, typer.Option("--agent", help="Let the LLM investigate with the code tools (via MCP) before deciding.")
+    ] = False,
+    budget: Annotated[
+        int, typer.Option(help="Agent only: maximum tool calls per candidate.", min=1, max=30)
+    ] = 8,
 ) -> None:
-    """Ask an LLM for a verdict on each candidate (single-shot baseline, no tools)."""
+    """Ask an LLM for a verdict on each candidate: single-shot by default, or with
+    --agent, after investigating the code with tools."""
     if min_severity not in ("low", "medium", "high", "critical"):
         console.print("[red]Error:[/] --min-severity must be low, medium, high or critical.")
         raise typer.Exit(code=1)
@@ -471,21 +480,37 @@ def triage_cmd(
             f"Triaging {len(candidates)} of {len(all_candidates)} candidates "
             f"(min severity {min_severity}{f', limit {limit}' if limit else ''}); the rest are not judged."
         )
-    try:
-        judge = triage.groq_judge(model)
-    except RuntimeError as exc:
-        console.print(f"[red]Error:[/] {exc}")
-        raise typer.Exit(code=1) from None
-
+    out = out or ("verdicts-agent.json" if use_agent else "verdicts.json")
     verdicts = []
-    with console.status("Triaging...") as status:
-        for i, cand in enumerate(candidates, 1):
-            status.update(f"Triaging {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
-            verdicts.append(triage.triage_candidate(cand, source_root, judge, model))
+    if use_agent:
+        import asyncio
+
+        from sast_triage import agent
+
+        with console.status("Starting the agent and the MCP server...") as status:
+            def progress(i: int, cand: Candidate) -> None:
+                status.update(f"Agent investigating {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
+            try:
+                verdicts = asyncio.run(agent.triage_all(candidates, source_root, model, budget, progress))
+            except RuntimeError as exc:
+                console.print(f"[red]Error:[/] {exc}")
+                raise typer.Exit(code=1) from None
+        version = agent.AGENT_PROMPT_VERSION
+    else:
+        try:
+            judge = triage.groq_judge(model)
+        except RuntimeError as exc:
+            console.print(f"[red]Error:[/] {exc}")
+            raise typer.Exit(code=1) from None
+        with console.status("Triaging...") as status:
+            for i, cand in enumerate(candidates, 1):
+                status.update(f"Triaging {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
+                verdicts.append(triage.triage_candidate(cand, source_root, judge, model))
+        version = triage.PROMPT_VERSION
     _write_json(scan_dir / out, [v.model_dump(mode="json") for v in verdicts])
 
-    table = Table(title=f"Verdicts ({model}, prompt {triage.PROMPT_VERSION})", title_justify="left")
-    for col in ("location", "verdict", "conf", "reasoning"):
+    table = Table(title=f"Verdicts ({model}, prompt {version})", title_justify="left")
+    for col in ("location", "verdict", "conf", "tools", "reasoning"):
         table.add_column(col)
     colours = {"true_positive": "red", "false_positive": "green", "needs_review": "yellow"}
     for v in verdicts:
@@ -494,6 +519,7 @@ def triage_cmd(
             f"{v.file}:{lines}",
             f"[{colours[v.verdict]}]{v.verdict}[/]",
             f"{v.confidence:.2f}",
+            str(len(v.tool_calls)),
             (v.error or (f"missing: {v.missing_context}" if v.verdict == "needs_review" and v.missing_context else v.reasoning))[:120],
         )
     console.print(table)
@@ -634,5 +660,6 @@ def mcp_server_cmd(
         err.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(code=1) from None
     where = f"http://127.0.0.1:{port}/mcp" if transport == "http" else "stdio"
-    err.print(f"Serving code tools for [bold]{resolved.source}[/] over {where} (read-only). Ctrl+C to stop.")
+    if not os.environ.get("SAST_TRIAGE_QUIET"):  # set when our agent starts the server itself
+        err.print(f"Serving code tools for [bold]{resolved.source}[/] over {where} (read-only). Ctrl+C to stop.")
     server.run(transport="streamable-http" if transport == "http" else "stdio")
