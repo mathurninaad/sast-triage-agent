@@ -100,9 +100,16 @@ uv run sast-triage tool examples/demo_app list_files "*.py"
 | `list_files` | What files exist (glob pattern) |
 | `read_file` | Lines of a file, numbered (at most 150 at a time) |
 | `search_code` | Where text (or a regex) appears |
-| `get_function` | A function or class's source, with decorators |
-| `find_references` | Where a function is called or imported (Python `ast`, so comments and strings don't count) |
-| `get_route_info` | Which URL reaches a view (Flask/FastAPI decorators, Django `urls.py`) and its other decorators, e.g. login checks |
+| `get_function` | A function or class's source, with decorators or annotations |
+| `find_references` | Where a function is called, and from which function (from the syntax tree, so comments and strings don't count) |
+| `get_route_info` | Which URL reaches a handler and what guards it: Flask/FastAPI decorators and Django `urls.py`; Express-style router calls, including factory handlers (`login()`), wrapped handlers and `app.use('/prefix', auth)` middleware; Go `net/http`-style routers; Spring and NestJS annotations with class-level prefixes |
+
+**Languages.** `list_files`, `read_file` and `search_code` work on any text.
+The three structural tools understand **Python** (via the standard library's
+`ast`) and **JavaScript, TypeScript/TSX, Java, Go and Ruby** (via
+[tree-sitter](https://tree-sitter.github.io/), one generic walker driven by a
+small table per language in `context/treesitter.py`). Adding a language means
+adding its grammar package and one table entry.
 
 They only read, every path must resolve inside the repository (no `..`,
 absolute paths or symlinks leading out), dependency folders are invisible,
