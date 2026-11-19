@@ -76,7 +76,7 @@ def test_fp01_investigation_end_to_end():
             AIMessage(content="The only caller converts user_id with int() first."),
         )
         decider = Decider()
-        graph = agent.build_graph(model, tools, decider, budget=8)
+        graph = agent.build_graph(model, tools, decider)
         v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "test-model", 8)
 
         assert v.verdict == "false_positive" and v.prompt_version == agent.AGENT_PROMPT_VERSION
@@ -87,6 +87,8 @@ def test_fp01_investigation_end_to_end():
         assert "The only caller converts" in log               # the model's own notes
         assert "Judge only that claimed weakness" in decider.seen[0].content  # same base prompt as M2
         assert "at most 8 tool calls" in model.inputs[0][0].content          # agent guidance + budget
+        assert "[calls left: 7 of 8]" in log and "[calls left: 6 of 8]" in log
+        assert v.tool_budget == 8 and v.budget_extended is False
     run(check)
 
 
@@ -95,7 +97,7 @@ def test_budget_is_enforced_by_code():
     async def check(tools):
         endless = Script(*[AIMessage(content="", tool_calls=[call("list_files", {}, str(i))]) for i in range(20)])
         decider = Decider()
-        graph = agent.build_graph(endless, tools, decider, budget=3)
+        graph = agent.build_graph(endless, tools, decider)
         v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "m", 3)
         assert len(v.tool_calls) == 3                 # the 4th request is never run
         assert len(endless.inputs) == 4              # asked 4 times, 3 calls executed
@@ -146,3 +148,89 @@ def test_real_run_needs_a_key(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         anyio.run(agent.triage_all, [], DEMO_APP)
+
+
+# Adaptive budget and extension
+
+
+def _with(severity="medium", trace_files=()):
+    from sast_triage.models import Severity, TraceStep
+    c = fp01()
+    trace = [TraceStep(file=f, line=1) for f in trace_files]
+    f = c.findings[0].model_copy(update={"trace": trace})
+    return c.model_copy(update={"severity": Severity(severity), "findings": [f]})
+
+
+def test_budget_for_adapts_to_the_candidate():
+    assert agent.budget_for(_with("medium")) == 8
+    assert agent.budget_for(_with("critical")) == 10                             # severe: +2
+    assert agent.budget_for(_with("low")) == 6                                   # low: -2
+    assert agent.budget_for(_with("high", ["app.py", "db.py"])) == 14            # +2, and +4 cross-file
+    assert agent.budget_for(_with("medium", ["db.py", "db.py"])) == 8            # same file: no bonus
+    assert agent.budget_for(_with("critical", ["a.py", "b.py"]), base=14) == 16  # capped at the ceiling
+    assert agent.budget_for(_with("low"), base=1) == 2                           # never below 2
+
+
+def test_extension_is_granted_once_and_logged():
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[call("list_files", {}, "1"), call("list_files", {}, "2")]),
+            AIMessage(content="", tool_calls=[call("request_more_budget", {"reason": "still following callers"}, "3")]),
+            AIMessage(content="", tool_calls=[call("find_references", {"name": "get_user_by_id"}, "4")]),
+            AIMessage(content="", tool_calls=[call("request_more_budget", {"reason": "again"}, "5")]),
+            AIMessage(content="done"),
+        )
+        decider = Decider()
+        graph = agent.build_graph(model, tools, decider, max_budget=16, extension=4)
+        v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "m", 2)
+        log = decider.seen[-1].content
+        assert "Granted: your budget is now 6" in log
+        # a second request goes straight to finalize, with a note saying why
+        assert "another budget extension was requested and refused" in log
+        assert len(model.inputs) == 4
+        assert v.tool_budget == 6 and v.budget_extended is True
+        assert "request_more_budget(reason='still following callers')" in v.tool_calls  # auditable reason
+        assert "find_references(name='get_user_by_id')" in v.tool_calls                  # ran thanks to it
+    run(check)
+
+
+def test_extension_never_exceeds_the_ceiling():
+    async def check(tools):
+        model = Script(AIMessage(content="", tool_calls=[call("request_more_budget", {"reason": "r"}, "1")]),
+                       AIMessage(content="done"))
+        decider = Decider()
+        graph = agent.build_graph(model, tools, decider, max_budget=10, extension=4)
+        v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "m", 8, max_budget=10)
+        assert v.tool_budget == 10   # 8 + 4 would be 12; capped at 10
+    run(check)
+
+
+def test_repeated_extension_requests_cannot_loop():
+    async def check(tools):
+        nagging = Script(*[AIMessage(content="", tool_calls=[call("request_more_budget", {"reason": "r"}, str(i))])
+                           for i in range(30)])
+        decider = Decider()
+        v = await agent.triage_candidate(agent.build_graph(nagging, tools, decider), fp01(), DEMO_APP, "m", 4)
+        assert v.error is None and v.verdict == "false_positive"
+        assert len(nagging.inputs) == 2   # granted once; asking again goes straight to finalize
+    run(check)
+
+
+def test_budget_report():
+    from sast_triage.triage import Verdict
+    def V(calls, budget, extended=False):
+        return Verdict(candidate_id="c", file="a.py", start_line=1, end_line=1, model="m",
+                       prompt_version=agent.AGENT_PROMPT_VERSION, source_is_attacker_controlled="yes",
+                       sanitized="no", reasoning="r", verdict="true_positive", confidence=0.9,
+                       tool_calls=calls, tool_budget=budget, budget_extended=extended)
+    r = agent.budget_report([V(["a()", "b()"], 8), V(["a()"] * 8, 8),
+                             V(["a()"] * 9 + ["request_more_budget(reason='x')"], 12, True)])
+    assert r == {"candidates": 3, "median_calls": 8, "max_calls": 9, "hit_budget": 1, "extended": 1}
+
+
+def test_prompts_have_no_stray_backslashes():
+    """Regression: line continuations were once written with two backslashes,
+    leaving literal '\\' characters in the agent's prompts."""
+    from sast_triage import triage
+    for text in (agent.AGENT_GUIDANCE, agent.FINAL_INSTRUCTION, triage.SYSTEM_PROMPT):
+        assert "\\" not in text
