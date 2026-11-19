@@ -544,6 +544,11 @@ def triage_cmd(
                 f"Tool budget ({mode}): median {r['median_calls']} calls, max {r['max_calls']}; "
                 f"{r['hit_budget']} of {r['candidates']} hit their budget, {r['extended']} asked for and got an extension."
             )
+            if r["parse_retries"] or r["repaired_calls"]:
+                console.print(
+                    f"Recovered: {r['parse_retries']} unreadable model replies retried, "
+                    f"{r['repaired_calls']} tool calls with a wrong name or argument corrected."
+                )
     console.print(f"Saved to [bold]{scan_dir / out}[/]")
 
 
