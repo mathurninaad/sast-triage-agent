@@ -83,6 +83,8 @@ class Verdict(BaseModel):
     tool_calls: list[str] = Field(
         default_factory=list, description="Tools the agent called, in order (agent triage only)"
     )
+    tool_budget: int | None = Field(default=None, description="Agent only: the candidate's final tool budget")
+    budget_extended: bool = Field(default=False, description="Agent only: whether it asked for and got an extension")
     error: str | None = Field(default=None, description="Set if the LLM call failed")
 
 

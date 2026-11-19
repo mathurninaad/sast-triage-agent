@@ -465,8 +465,15 @@ def triage_cmd(
         bool, typer.Option("--agent", help="Let the LLM investigate with the code tools (via MCP) before deciding.")
     ] = False,
     budget: Annotated[
-        int, typer.Option(help="Agent only: maximum tool calls per candidate.", min=1, max=30)
+        int, typer.Option(help="Agent only: base tool calls per candidate (adjusted per candidate "
+                          "unless --fixed-budget).", min=1, max=30)
     ] = 8,
+    max_budget: Annotated[
+        int, typer.Option(help="Agent only: hard ceiling on tool calls per candidate, extension included.", min=1, max=40)
+    ] = 16,
+    fixed_budget: Annotated[
+        bool, typer.Option("--fixed-budget", help="Agent only: give every candidate exactly --budget calls.")
+    ] = False,
 ) -> None:
     """Ask an LLM for a verdict on each candidate: single-shot by default, or with
     --agent, after investigating the code with tools."""
@@ -491,7 +498,10 @@ def triage_cmd(
             def progress(i: int, cand: Candidate) -> None:
                 status.update(f"Agent investigating {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
             try:
-                verdicts = asyncio.run(agent.triage_all(candidates, source_root, model, budget, progress))
+                verdicts = asyncio.run(agent.triage_all(
+                    candidates, source_root, model, budget, progress,
+                    max_budget=max_budget, adaptive=not fixed_budget,
+                ))
             except RuntimeError as exc:
                 console.print(f"[red]Error:[/] {exc}")
                 raise typer.Exit(code=1) from None
@@ -526,6 +536,14 @@ def triage_cmd(
     errors = sum(1 for v in verdicts if v.error)
     if errors:
         console.print(f"[yellow]{errors} candidates could not be triaged (kept as needs_review).[/]")
+    if use_agent:
+        r = agent.budget_report(verdicts)
+        if r["candidates"]:
+            mode = f"fixed at {budget}" if fixed_budget else f"adaptive from base {budget}, ceiling {max_budget}"
+            console.print(
+                f"Tool budget ({mode}): median {r['median_calls']} calls, max {r['max_calls']}; "
+                f"{r['hit_budget']} of {r['candidates']} hit their budget, {r['extended']} asked for and got an extension."
+            )
     console.print(f"Saved to [bold]{scan_dir / out}[/]")
 
 
