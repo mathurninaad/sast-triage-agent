@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -112,3 +113,14 @@ class Candidate(BaseModel):
     @property
     def rules(self) -> list[str]:
         return sorted({f.rule_id for f in self.findings})
+
+
+class Citation(BaseModel):
+    """One piece of code a verdict cites, and whether the evidence check found it (see evidence.py)."""
+
+    file: str
+    start_line: int
+    end_line: int
+    quote: str | None = Field(default=None, description="Code quoted in the same sentence, if any")
+    status: Literal["verified", "unseen", "contradicted"]
+    detail: str = ""

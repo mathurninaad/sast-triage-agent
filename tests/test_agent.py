@@ -51,8 +51,9 @@ class ParseError(Exception):
 
 
 class Decider:
-    def __init__(self, verdict="false_positive", fail=False, parse_failures=0):
-        self.verdict, self.fail, self.seen = verdict, fail, None
+    def __init__(self, verdict="false_positive", fail=False, parse_failures=0,
+                 reasoning="The query at db.py lines 23-24 only ever receives an integer."):
+        self.verdict, self.fail, self.seen, self.reasoning = verdict, fail, None, reasoning
         self.parse_failures, self.calls = parse_failures, 0
 
     async def __call__(self, messages):
@@ -63,7 +64,7 @@ class Decider:
             raise ParseError(code="tool_use_failed")
         return Judgement(weakness_under_review="SQL injection (CWE-89), db.py 23-24",
                          source_is_attacker_controlled="yes", sanitized="yes",
-                         reasoning="app.py:34 converts with int().", missing_context=None,
+                         reasoning=self.reasoning, missing_context=None,
                          verdict=self.verdict, confidence=0.9, exploit_scenario=None, fix=None)
 
 
@@ -355,4 +356,28 @@ def test_repaired_call_returns_the_lines_that_were_asked_for():
         assert v.repaired_calls == ["functions.read_file(path='app.py', line_start=80, line_end=84) -> "
                                     "read_file(path='app.py', start=80, end=84)"]
         assert agent.budget_report([v])["repaired_calls"] == 1
+    run(check)
+
+
+# Evidence check (step 18)
+
+
+def test_agent_evidence_is_checked_against_what_it_read():
+    """FP-01: after reading get_user, citing app.py:34 is verified; without reading
+    it, the same claim is unseen and the false_positive goes to review."""
+    claim = "app.py (line 34) casts the value with `uid = int(user_id)` before the call."
+
+    async def check(tools):
+        reads = Script(AIMessage(content="", tool_calls=[call("get_function", {"name": "get_user"}, "1")]),
+                       AIMessage(content="done"))
+        v = await agent.triage_candidate(agent.build_graph(reads, tools, Decider(reasoning=claim)),
+                                         fp01(), DEMO_APP, "m", 8)
+        assert v.verdict == "false_positive" and v.evidence_status == "verified"
+        assert [(c.file, c.start_line) for c in v.evidence] == [("app.py", 34)]
+
+        guesses = Script(AIMessage(content="done"))
+        v = await agent.triage_candidate(agent.build_graph(guesses, tools, Decider(reasoning=claim)),
+                                         fp01(), DEMO_APP, "m", 8)
+        assert v.verdict == "needs_review" and v.original_verdict == "false_positive"
+        assert v.evidence_status == "unseen" and "never shown" in v.missing_context
     run(check)
