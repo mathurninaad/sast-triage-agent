@@ -18,7 +18,7 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from sast_triage.models import Candidate
+from sast_triage.models import Candidate, Citation
 
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 CONTEXT_LINES = 12  # lines of surrounding code shown above and below the candidate
@@ -90,6 +90,13 @@ class Verdict(BaseModel):
     )
     repaired_calls: list[str] = Field(
         default_factory=list, description="Agent only: tool calls whose name or arguments were corrected"
+    )
+    evidence: list[Citation] = Field(default_factory=list, description="The cited code, as checked")
+    evidence_status: Literal["verified", "unseen", "contradicted", "none", "error"] | None = Field(
+        default=None, description="Result of the evidence check (None if it did not run)"
+    )
+    original_verdict: str | None = Field(
+        default=None, description="Set when the evidence check changed the verdict"
     )
     error: str | None = Field(default=None, description="Set if the LLM call failed")
 
@@ -200,10 +207,13 @@ def is_import_warning_only(candidate: Candidate) -> bool:
     return bool(candidate.findings) and all(import_check(f) for f in candidate.findings)
 
 
-def triage_candidate(candidate: Candidate, base_dir: Path, judge: Judge, model: str) -> Verdict:
+def triage_candidate(
+    candidate: Candidate, base_dir: Path, judge: Judge, model: str, evidence_check: bool = True
+) -> Verdict:
     """Judge one candidate. If the LLM call fails, the candidate is kept for
     human review with the error recorded, so one failure can't stop a run
-    or silently hide a possible bug."""
+    or silently hide a possible bug. With evidence_check, the citations in the
+    reasoning are checked against the code window the model was shown."""
     meta = dict(
         candidate_id=candidate.id,
         file=candidate.file,
@@ -223,8 +233,9 @@ def triage_candidate(candidate: Candidate, base_dir: Path, judge: Judge, model: 
             model="rule:import-warning",
             **meta,
         )
+    messages = build_messages(candidate, base_dir)
     try:
-        judgement = judge(build_messages(candidate, base_dir))
+        judgement = judge(messages)
     except Exception as exc:  # network, rate limit, malformed output: record and carry on
         return Verdict(
             source_is_attacker_controlled="unclear",
@@ -236,7 +247,11 @@ def triage_candidate(candidate: Candidate, base_dir: Path, judge: Judge, model: 
             model=model,
             **meta,
         )
-    return Verdict(**judgement.model_dump(), model=model, **meta)
+    verdict = Verdict(**judgement.model_dump(), model=model, **meta)
+    if evidence_check:
+        from sast_triage import evidence
+        verdict = evidence.check_verdict(verdict, candidate, base_dir, seen_text=messages[1][1])
+    return verdict
 
 
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}

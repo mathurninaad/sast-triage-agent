@@ -474,6 +474,11 @@ def triage_cmd(
     fixed_budget: Annotated[
         bool, typer.Option("--fixed-budget", help="Agent only: give every candidate exactly --budget calls.")
     ] = False,
+    evidence_check: Annotated[
+        bool, typer.Option("--evidence-check/--no-evidence-check",
+                           help="Check the code each verdict cites; a false_positive without verified "
+                                "evidence becomes needs_review.")
+    ] = True,
 ) -> None:
     """Ask an LLM for a verdict on each candidate: single-shot by default, or with
     --agent, after investigating the code with tools."""
@@ -500,7 +505,7 @@ def triage_cmd(
             try:
                 verdicts = asyncio.run(agent.triage_all(
                     candidates, source_root, model, budget, progress,
-                    max_budget=max_budget, adaptive=not fixed_budget,
+                    max_budget=max_budget, adaptive=not fixed_budget, evidence_check=evidence_check,
                 ))
             except RuntimeError as exc:
                 console.print(f"[red]Error:[/] {exc}")
@@ -515,7 +520,7 @@ def triage_cmd(
         with console.status("Triaging...") as status:
             for i, cand in enumerate(candidates, 1):
                 status.update(f"Triaging {i}/{len(candidates)}: {cand.file}:{cand.start_line}")
-                verdicts.append(triage.triage_candidate(cand, source_root, judge, model))
+                verdicts.append(triage.triage_candidate(cand, source_root, judge, model, evidence_check))
         version = triage.PROMPT_VERSION
     _write_json(scan_dir / out, [v.model_dump(mode="json") for v in verdicts])
 
@@ -536,6 +541,7 @@ def triage_cmd(
     errors = sum(1 for v in verdicts if v.error)
     if errors:
         console.print(f"[yellow]{errors} candidates could not be triaged (kept as needs_review).[/]")
+    _evidence_summary(verdicts)
     if use_agent:
         r = agent.budget_report(verdicts)
         if r["candidates"]:
@@ -550,6 +556,65 @@ def triage_cmd(
                     f"{r['repaired_calls']} tool calls with a wrong name or argument corrected."
                 )
     console.print(f"Saved to [bold]{scan_dir / out}[/]")
+
+
+def _evidence_summary(verdicts: list[triage.Verdict]) -> None:
+    checked = [v for v in verdicts if v.evidence_status]
+    if not checked:
+        return
+    counts = {s: sum(1 for v in checked if v.evidence_status == s)
+              for s in ("verified", "unseen", "contradicted", "none")}
+    flipped = [v for v in checked if v.original_verdict]
+    console.print(
+        f"Evidence check: {counts['verified']} verified, {counts['unseen']} cited unseen code, "
+        f"{counts['contradicted']} contradicted, {counts['none']} cited nothing; "
+        f"{len(flipped)} false_positive verdict(s) sent to review."
+    )
+
+
+@app.command("check-evidence")
+def check_evidence_cmd(
+    scan_dir: ScanDirArg,
+    verdicts_name: Annotated[
+        str, typer.Option("--verdicts", help="Verdicts file inside the scan folder.")
+    ] = "verdicts.json",
+    out: Annotated[
+        Optional[str], typer.Option(help="Save the checked verdicts under this name in the scan folder.")
+    ] = None,
+) -> None:
+    """Run the evidence check on saved verdicts (e.g. from before it existed).
+    The transcripts are not saved, so this checks files, lines and quotes, but
+    not whether the model had seen the cited code."""
+    from sast_triage import evidence
+
+    candidates, source_root = _load_scan(scan_dir)
+    by_id = {c.id: c for c in candidates}
+    verdict_file = scan_dir / verdicts_name
+    if not verdict_file.exists():
+        console.print(f"[red]Error:[/] no {verdicts_name} in {scan_dir}.")
+        raise typer.Exit(code=1)
+    checked = []
+    for raw in json.loads(verdict_file.read_text()):
+        v = triage.Verdict.model_validate(raw)
+        if v.original_verdict:  # already checked once: start again from the model's verdict
+            v = v.model_copy(update={"verdict": v.original_verdict, "original_verdict": None})
+        cand = by_id.get(v.candidate_id)
+        checked.append(evidence.check_verdict(v, cand, source_root) if cand else v)
+
+    table = Table(title=f"Evidence check: {verdicts_name}", title_justify="left")
+    for col in ("location", "verdict", "evidence", "citations"):
+        table.add_column(col)
+    marks = {"verified": "green", "unseen": "yellow", "contradicted": "red"}
+    for v in checked:
+        cites = "; ".join(f"[{marks[c.status]}]{c.file}:{c.start_line}[/]"
+                          + (f" {c.detail}" if c.status != "verified" else "") for c in v.evidence)
+        verdict = v.verdict if not v.original_verdict else f"{v.original_verdict} -> [yellow]{v.verdict}[/]"
+        table.add_row(f"{v.file}:{v.start_line}", verdict, v.evidence_status or "-", cites[:160])
+    console.print(table)
+    _evidence_summary(checked)
+    if out:
+        _write_json(scan_dir / out, [v.model_dump(mode="json") for v in checked])
+        console.print(f"Saved to [bold]{scan_dir / out}[/]")
 
 
 @app.command("evaluate")
