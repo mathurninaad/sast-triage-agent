@@ -36,17 +36,31 @@ class Script:
 
     async def __call__(self, messages):
         self.inputs.append(list(messages))
-        return self.replies.pop(0) if self.replies else AIMessage(content="done")
+        reply = self.replies.pop(0) if self.replies else AIMessage(content="done")
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+
+class ParseError(Exception):
+    """Shaped like the Groq 400 from the first real run: the provider could not
+    parse the model's reply, and returns what the model wrote."""
+    def __init__(self, generated="We need to see where save_stats is called.", code="output_parse_failed"):
+        super().__init__(f"Error code: 400 - {code}")
+        self.body = {"error": {"code": code, "failed_generation": generated}}
 
 
 class Decider:
-    def __init__(self, verdict="false_positive", fail=False):
+    def __init__(self, verdict="false_positive", fail=False, parse_failures=0):
         self.verdict, self.fail, self.seen = verdict, fail, None
+        self.parse_failures, self.calls = parse_failures, 0
 
     async def __call__(self, messages):
-        self.seen = messages
+        self.seen, self.calls = messages, self.calls + 1
         if self.fail:
             raise TimeoutError("rate limited")
+        if self.calls <= self.parse_failures:
+            raise ParseError(code="tool_use_failed")
         return Judgement(weakness_under_review="SQL injection (CWE-89), db.py 23-24",
                          source_is_attacker_controlled="yes", sanitized="yes",
                          reasoning="app.py:34 converts with int().", missing_context=None,
@@ -225,12 +239,120 @@ def test_budget_report():
                        tool_calls=calls, tool_budget=budget, budget_extended=extended)
     r = agent.budget_report([V(["a()", "b()"], 8), V(["a()"] * 8, 8),
                              V(["a()"] * 9 + ["request_more_budget(reason='x')"], 12, True)])
-    assert r == {"candidates": 3, "median_calls": 8, "max_calls": 9, "hit_budget": 1, "extended": 1}
+    assert r == {"candidates": 3, "median_calls": 8, "max_calls": 9, "hit_budget": 1, "extended": 1,
+                 "parse_retries": 0, "repaired_calls": 0}
 
 
 def test_prompts_have_no_stray_backslashes():
     """Regression: line continuations were once written with two backslashes,
     leaving literal '\\' characters in the agent's prompts."""
     from sast_triage import triage
-    for text in (agent.AGENT_GUIDANCE, agent.FINAL_INSTRUCTION, triage.SYSTEM_PROMPT):
+    for text in (agent.AGENT_GUIDANCE, agent.FINAL_INSTRUCTION, triage.SYSTEM_PROMPT,
+                 agent.RETRY_NUDGE, agent.DECIDE_NUDGE):
         assert "\\" not in text
+
+
+# Hardening, from the failures of the first real run (verdicts-agent.json, agent-v1)
+
+
+def test_parse_failure_is_recognised():
+    assert agent.parse_failure(ParseError("plan")) == "plan"
+    assert agent.parse_failure(ParseError("x", code="tool_use_failed")) == "x"
+    assert agent.parse_failure(Exception("400 output_parse_failed")) == ""   # no body: still recognised
+    assert agent.parse_failure(TimeoutError("rate limited")) is None          # other errors are not retried here
+
+
+def test_unparseable_reply_is_retried_with_its_text_kept():
+    """Run 1 lost FP-03 this way: the model wrote its plan instead of a tool call."""
+    async def check(tools):
+        model = Script(
+            ParseError("We need to see where save_stats is called."),
+            AIMessage(content="", tool_calls=[call("find_references", {"name": "save_stats"}, "1")]),
+            AIMessage(content="Only called with server-side stats."),
+        )
+        decider = Decider()
+        v = await agent.triage_candidate(agent.build_graph(model, tools, decider), fp01(), DEMO_APP, "m", 8)
+        assert v.error is None and v.verdict == "false_positive"
+        assert v.parse_retries == 1
+        assert v.tool_calls == ["find_references(name='save_stats')"]
+        retry_input = model.inputs[1]
+        assert retry_input[-2].content == "We need to see where save_stats is called."  # its plan, kept
+        assert retry_input[-1].content == agent.RETRY_NUDGE
+        assert "We need to see where save_stats is called." in decider.seen[-1].content
+    run(check)
+
+
+def test_repeated_parse_failures_decide_with_what_was_found():
+    """Instead of crashing to needs_review with an error, the agent stops investigating
+    and the decision is still made, told that the investigation ended early."""
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[call("get_function", {"name": "get_user"}, "1")]),
+            *[ParseError("Need HOSTNAME_RE.") for _ in range(10)],
+        )
+        decider = Decider()
+        graph = agent.build_graph(model, tools, decider, parse_retries=2)
+        v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "m", 8)
+        assert v.error is None and v.verdict == "false_positive"
+        assert v.parse_retries == 3 and len(model.inputs) == 4   # 1 good turn, then 1 try + 2 retries
+        log = decider.seen[-1].content
+        assert "stopped early" in log and "uid = int(user_id)" in log   # evidence from before the failures
+    run(check)
+
+
+def test_other_model_errors_still_keep_the_candidate_for_review():
+    async def check(tools):
+        model = Script(TimeoutError("rate limited"))
+        v = await agent.triage_candidate(agent.build_graph(model, tools, Decider()), fp01(), DEMO_APP, "m", 8)
+        assert v.verdict == "needs_review" and "rate limited" in v.error and len(model.inputs) == 1
+    run(check)
+
+
+def test_final_decision_is_retried_on_parse_failure():
+    async def check(tools):
+        decider = Decider(parse_failures=1)
+        graph = agent.build_graph(Script(AIMessage(content="done")), tools, decider)
+        v = await agent.triage_candidate(graph, fp01(), DEMO_APP, "m", 8)
+        assert v.error is None and decider.calls == 2
+        assert decider.seen[-1].content == agent.DECIDE_NUDGE
+    run(check)
+
+
+def test_repair_call():
+    async def check(tools):
+        by_name = {t.name: t for t in tools}
+        # the exact calls from run 1
+        assert agent.repair_call("repo_browser.search_code",
+                                 {"max_results": 20, "path": "", "query": "get_user_by_id("}, by_name) == (
+            "search_code", {"limit": 20, "query": "get_user_by_id("}, None)
+        assert agent.repair_call("read_file", {"line_end": 60, "line_start": 1, "path": "app.py"}, by_name) == (
+            "read_file", {"end": 60, "start": 1, "path": "app.py"}, None)
+        assert agent.repair_call("search_code", {"max_results": 20, "path": "*", "query": "UPLOAD_DIR"},
+                                 by_name) == ("search_code", {"limit": 20, "pattern": "*", "query": "UPLOAD_DIR"}, None)
+        # correct calls are untouched; a real parameter is never overwritten by an alias
+        assert agent.repair_call("get_function", {"name": "x", "file": "db.py"}, by_name) == (
+            "get_function", {"name": "x", "file": "db.py"}, None)
+        # unknown arguments are an error naming the real ones, not silently dropped
+        name, _, error = agent.repair_call("read_file", {"path": "app.py", "lines": "80-84"}, by_name)
+        assert name == "read_file" and "no parameter 'lines'" in error
+        assert "read_file(path (required), start, end)" in error
+        assert "no tool called 'delete_everything'" in agent.repair_call("delete_everything", {}, by_name)[2]
+    run(check)
+
+
+def test_repaired_call_returns_the_lines_that_were_asked_for():
+    """Before: read_file(line_start=80, line_end=84) silently returned lines 1-122."""
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[
+                call("functions.read_file", {"path": "app.py", "line_start": 80, "line_end": 84}, "1")]),
+            AIMessage(content="done"),
+        )
+        decider = Decider()
+        v = await agent.triage_candidate(agent.build_graph(model, tools, decider), fp01(), DEMO_APP, "m", 8)
+        assert "app.py (lines 80-84 of" in decider.seen[-1].content
+        assert v.tool_calls == ["read_file(path='app.py', start=80, end=84)"]
+        assert v.repaired_calls == ["functions.read_file(path='app.py', line_start=80, line_end=84) -> "
+                                    "read_file(path='app.py', start=80, end=84)"]
+        assert agent.budget_report([v])["repaired_calls"] == 1
+    run(check)

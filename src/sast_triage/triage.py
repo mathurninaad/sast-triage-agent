@@ -85,6 +85,12 @@ class Verdict(BaseModel):
     )
     tool_budget: int | None = Field(default=None, description="Agent only: the candidate's final tool budget")
     budget_extended: bool = Field(default=False, description="Agent only: whether it asked for and got an extension")
+    parse_retries: int = Field(
+        default=0, description="Agent only: replies the provider could not parse and that were retried"
+    )
+    repaired_calls: list[str] = Field(
+        default_factory=list, description="Agent only: tool calls whose name or arguments were corrected"
+    )
     error: str | None = Field(default=None, description="Set if the LLM call failed")
 
 
