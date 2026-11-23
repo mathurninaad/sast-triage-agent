@@ -4,8 +4,8 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version < '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version < '3.14' and sys_platform == 'win32'",
     "(python_full_version < '3.12' and sys_platform == 'emscripten') or (python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32')",
 ]
 
@@ -1588,6 +1588,7 @@ dependencies = [
     { name = "bandit" },
     { name = "langchain-core" },
     { name = "langchain-groq" },
+    { name = "mcp" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "semgrep" },
@@ -1604,6 +1605,7 @@ requires-dist = [
     { name = "bandit", specifier = ">=1.7" },
     { name = "langchain-core", specifier = ">=0.3" },
     { name = "langchain-groq", specifier = ">=0.3" },
+    { name = "mcp", specifier = ">=1.9" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "semgrep", specifier = ">=1.140" },

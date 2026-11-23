@@ -49,17 +49,17 @@ RefOpt = Annotated[
 ]
 
 
-def _resolve(target: str, ref: Optional[str]) -> targets.Target:
+def _resolve(target: str, ref: Optional[str], out: Console = console) -> targets.Target:
     """Turn the user's target into a local folder, downloading it if it's a URL."""
     if targets.parse_github_url(target):
-        console.print(f"Fetching [bold]{target}[/]{f' at {ref}' if ref else ''} ...")
+        out.print(f"Fetching [bold]{target}[/]{f' at {ref}' if ref else ''} ...")
     try:
         resolved = targets.resolve_target(target, ref)
     except targets.TargetError as exc:
-        console.print(f"[red]Error:[/] {exc}")
+        out.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(code=1) from None
     if resolved.commit:
-        console.print(f"Got {resolved.source} at commit [bold]{resolved.commit[:12]}[/]")
+        out.print(f"Got {resolved.source} at commit [bold]{resolved.commit[:12]}[/]")
     return resolved
 
 
@@ -604,3 +604,35 @@ def tool_cmd(
     except (RepoError, TypeError, ValueError) as exc:
         console.print(f"[red]Error:[/] {exc}")
         raise typer.Exit(code=1) from None
+
+
+@app.command("mcp-server")
+def mcp_server_cmd(
+    target: TargetArg,
+    ref: RefOpt = None,
+    transport: Annotated[
+        str, typer.Option(help="stdio (for desktop clients and our agent) or http (streamable HTTP).")
+    ] = "stdio",
+    port: Annotated[int, typer.Option(help="Port for the http transport.")] = 8765,
+) -> None:
+    """Serve the code-navigation tools for one repository over MCP.
+
+    With stdio, standard output carries the protocol, so all messages from
+    this command go to stderr.
+    """
+    from sast_triage.mcp_server import build_server
+
+    err = Console(stderr=True)
+    if transport not in ("stdio", "http"):
+        err.print("[red]Error:[/] --transport must be stdio or http.")
+        raise typer.Exit(code=1)
+    resolved = _resolve(target, ref, out=err)
+    root = resolved.path if resolved.path.is_dir() else resolved.path.parent
+    try:
+        server = build_server(root, host="127.0.0.1", port=port)
+    except RepoError as exc:
+        err.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(code=1) from None
+    where = f"http://127.0.0.1:{port}/mcp" if transport == "http" else "stdio"
+    err.print(f"Serving code tools for [bold]{resolved.source}[/] over {where} (read-only). Ctrl+C to stop.")
+    server.run(transport="streamable-http" if transport == "http" else "stdio")
