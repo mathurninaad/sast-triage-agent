@@ -5,9 +5,13 @@ returns plain text for an LLM to read, kept short by hard caps.
   read_file        a range of lines
   search_code      text or regex search across files
   get_function     a function or class definition, with its decorators
-  find_references  where a function is called (via Python's ast, so names in
-                   comments or strings don't count)
+  find_references  where a function is called (from the syntax tree, so names
+                   in comments or strings don't count)
   get_route_info   which URL reaches a view function, with which decorators
+
+The structural tools (get_function, find_references, get_route_info) cover
+Python through the standard library's `ast`, and JavaScript, TypeScript,
+Java, Go and Ruby through tree-sitter (see treesitter.py).
 
 Bad requests raise RepoError with a message meant for the agent.
 """
@@ -20,6 +24,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from sast_triage.context import treesitter as tsx
 from sast_triage.context.repo import Repo, RepoError
 
 MAX_OUTPUT_CHARS = 8000
@@ -83,13 +88,30 @@ def _enclosing(defs: list[_Def], line: int) -> str:
     return max(inside, key=lambda d: d.start).qualname if inside else "<module>"
 
 
-def _python_files(repo: Repo, file: str | None) -> list[Path]:
+STRUCTURED_EXTENSIONS = frozenset({".py"}) | tsx.SUPPORTED_EXTENSIONS
+
+
+def _source_files(repo: Repo, file: str | None) -> list[Path]:
+    """Files the structural tools understand: Python plus the tree-sitter languages."""
     if file:
         path = repo.resolve(file)
         if not path.is_file():
             raise RepoError(f"no such file: {file}")
+        if path.suffix.lower() not in STRUCTURED_EXTENSIONS:
+            raise RepoError(
+                f"{file}: this tool understands {', '.join(sorted(STRUCTURED_EXTENSIONS))} files; "
+                "use read_file or search_code for others"
+            )
         return [path]
-    return repo.files(".py")
+    return [p for p in repo.files() if p.suffix.lower() in STRUCTURED_EXTENSIONS]
+
+
+def _ts_tree(path: Path):
+    """(tree, spec) for a tree-sitter language file, or (None, None)."""
+    spec = tsx.spec_for(path)
+    if spec is None or path.stat().st_size > 1_000_000:
+        return None, None
+    return tsx.parse(path, spec), spec
 
 
 # The tools
@@ -154,20 +176,24 @@ def search_code(repo: Repo, query: str, regex: bool = False, pattern: str = "*",
 
 def get_function(repo: Repo, name: str, file: str | None = None) -> str:
     """Source of every function, method or class called `name` ('Cls.method' also
-    works), including its decorators, with line numbers."""
+    works), including its decorators or annotations, with line numbers."""
     out: list[str] = []
-    for path in _python_files(repo, file):
-        tree = repo.parse(path)
-        if tree is None:
-            continue
+    for path in _source_files(repo, file):
         rel = repo.rel(path)
+        if path.suffix.lower() == ".py":
+            tree = repo.parse(path)
+            found = [(d.qualname, d.start, d.end) for d in _definitions(tree) if name in (d.name, d.qualname)] if tree else []
+        else:
+            ts_tree, spec = _ts_tree(path)
+            found = [(d.qualname, d.start, d.end) for d in tsx.definitions(ts_tree, spec)
+                     if name in (d.name, d.qualname)] if ts_tree else []
+        if not found:
+            continue
         lines = repo.read_lines(rel)
-        for d in _definitions(tree):
-            if name not in (d.name, d.qualname):
-                continue
-            end = min(d.end, d.start + MAX_DEF_LINES - 1)
-            cut = f"\n(definition continues to line {d.end})" if end < d.end else ""
-            out.append(f"{rel}:{d.start}-{d.end} ({d.qualname}):\n{_numbered(lines, d.start, end)}{cut}")
+        for qualname, start, end_line in found:
+            end = min(end_line, start + MAX_DEF_LINES - 1)
+            cut = f"\n(definition continues to line {end_line})" if end < end_line else ""
+            out.append(f"{rel}:{start}-{end_line} ({qualname}):\n{_numbered(lines, start, end)}{cut}")
     if not out:
         return f"No function or class named {name!r} found" + (f" in {file}." if file else ".")
     return _cap("\n\n".join(out[:5]) + (f"\n\n... {len(out) - 5} more definitions" if len(out) > 5 else ""))
@@ -177,13 +203,17 @@ def find_references(repo: Repo, name: str, limit: int = 50) -> str:
     """Every place `name` is called (as name(...) or obj.name(...)) or imported,
     with the function it happens in. Names in comments and strings don't count."""
     hits: list[tuple[str, int, str, str]] = []
-    for path in repo.files(".py"):
+    for path in _source_files(repo, None):
+        rel = repo.rel(path)
+        if path.suffix.lower() != ".py":
+            ts_tree, spec = _ts_tree(path)
+            if ts_tree is not None:
+                hits += [(rel, line, kind, where) for line, kind, where in tsx.references(ts_tree, spec, name)]
+            continue
         tree = repo.parse(path)
         if tree is None:
             continue
-        rel = repo.rel(path)
         defs = _definitions(tree)
-        lines = repo.read_lines(rel)
         for node in ast.walk(tree):
             kind = None
             if isinstance(node, ast.Call):
@@ -243,36 +273,83 @@ def _django_routes(repo: Repo, name: str) -> list[str]:
 
 
 def get_route_info(repo: Repo, function: str, file: str | None = None) -> str:
-    """Whether `function` is a web endpoint: its URL(s) and HTTP methods (Flask/FastAPI
-    decorators, Django urls.py), and its other decorators, e.g. login checks."""
+    """Whether `function` is a web endpoint: its URL(s) and HTTP methods and its
+    other decorators/annotations, e.g. login checks. Understands Flask/FastAPI
+    decorators and Django urls.py (Python), Express-style router calls
+    (JavaScript/TypeScript), Go net/http and similar routers, and Spring/NestJS
+    route annotations."""
     out: list[str] = []
     has_route = False
-    for path in _python_files(repo, file):
-        tree = repo.parse(path)
-        if tree is None:
-            continue
-        for d in _definitions(tree):
-            if d.name != function or isinstance(d.node, ast.ClassDef):
+    for path in _source_files(repo, file):
+        rel = repo.rel(path)
+        if path.suffix.lower() == ".py":
+            tree = repo.parse(path)
+            if tree is None:
                 continue
-            decs = d.node.decorator_list  # type: ignore[attr-defined]
-            routes = [r for r in (_decorator_route(x) for x in decs) if r]
-            has_route = has_route or bool(routes)
-            others = [ast.unparse(x) for x in decs if not _decorator_route(x)]
-            auth = [o for o in others if any(h in o.lower() for h in AUTH_HINTS)]
-            lines = [f"{repo.rel(path)}:{d.start} {d.qualname}"]
-            lines.append(f"  routes: {', '.join(routes) if routes else 'none from decorators'}")
-            lines.append(f"  other decorators: {', '.join('@' + o for o in others) if others else 'none'}")
-            if auth:
-                lines.append(f"  looks like an access check: {', '.join('@' + a for a in auth)}")
-            out.append("\n".join(lines))
+            for d in _definitions(tree):
+                if d.name != function or isinstance(d.node, ast.ClassDef):
+                    continue
+                decs = d.node.decorator_list  # type: ignore[attr-defined]
+                routes = [r for r in (_decorator_route(x) for x in decs) if r]
+                others = [ast.unparse(x) for x in decs if not _decorator_route(x)]
+                has_route = has_route or bool(routes)
+                out.append(_route_block(rel, d.start, d.qualname, routes, others))
+        else:
+            ts_tree, spec = _ts_tree(path)
+            if ts_tree is None:
+                continue
+            for d in tsx.definitions(ts_tree, spec):
+                if d.name != function or d.kind == "class":
+                    continue
+                routes = tsx.annotation_routes(d, spec)
+                decs = tsx.decorators_of(d.node, spec)
+                others = [x for x in decs if not any(x.lstrip("@").startswith(k) for k in tsx.ROUTE_ANNOTATIONS)]
+                has_route = has_route or bool(routes)
+                out.append(_route_block(rel, d.start, d.qualname, routes, others))
+    router = []
+    routes_found, mounted = [], []
+    for path in _source_files(repo, None):
+        ts_tree, spec = _ts_tree(path) if path.suffix.lower() != ".py" else (None, None)
+        if ts_tree is None:
+            continue
+        routes_found += [(repo.rel(path), r) for r in tsx.router_routes(ts_tree, spec, function)]
+        mounted += [(repo.rel(path), m) for m in tsx.path_middleware(ts_tree, spec)]
+    for rel, r in routes_found:
+        line = f"  {rel}:{r.line}: {r.route}"
+        checks = [m for m in r.middleware if any(h in m.lower() for h in AUTH_HINTS)]
+        if r.middleware:
+            line += f" (middleware before it: {', '.join(r.middleware)})"
+        # app.use('/prefix', ...) middleware that also runs for this route
+        for m_rel, m in mounted:
+            if tsx.covers(m.path, r.path) and m.middleware:
+                line += f"\n    also runs app.use middleware for {m.path or '/'} ({m_rel}:{m.line}): {', '.join(m.middleware)}"
+                checks += [x for x in m.middleware if any(h in x.lower() for h in AUTH_HINTS)]
+        if checks:
+            line += f"\n    looks like an access check: {', '.join(dict.fromkeys(checks))}"
+        router.append(line)
+    if router:
+        has_route = True
+        out.append("Router calls registering it as a handler:\n" + "\n".join(router))
     django = _django_routes(repo, function)
     if django:
+        has_route = True
         out.append("Django URL patterns pointing at it:\n" + "\n".join(f"  {x}" for x in django))
     if not out:
         return f"No function named {function!r} found" + (f" in {file}." if file else ".")
-    if not has_route and not django:
+    if not has_route:
         out.append("No route found: it may not be reachable from a URL directly (check its callers).")
     return _cap("\n".join(out))
+
+
+def _route_block(rel: str, start: int, qualname: str, routes: list[str], others: list[str]) -> str:
+    auth = [o for o in others if any(h in o.lower() for h in AUTH_HINTS)]
+    shown = ", ".join(o if o.startswith("@") else "@" + o for o in others)
+    lines = [f"{rel}:{start} {qualname}",
+             f"  routes: {', '.join(routes) if routes else 'none from decorators'}",
+             f"  other decorators: {shown or 'none'}"]
+    if auth:
+        lines.append(f"  looks like an access check: {', '.join(a if a.startswith('@') else '@' + a for a in auth)}")
+    return "\n".join(lines)
 
 
 TOOLS = {

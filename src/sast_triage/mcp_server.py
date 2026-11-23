@@ -93,8 +93,8 @@ def build_server(root: Path, **settings) -> FastMCP:
         name: Annotated[str, Field(description="Function, method or class name; 'Class.method' also works")],
         file: Annotated[str | None, Field(description="Only look in this repo-relative file")] = None,
     ) -> str:
-        """Show the full source of a Python function, method or class, including its
-        decorators, with line numbers."""
+        """Show the full source of a function, method or class, including its decorators
+        or annotations, with line numbers. Python, JavaScript, TypeScript, Java, Go, Ruby."""
         return run(t.get_function, name=name, file=file)
 
     @server.tool(title="Find references", annotations=_READ_ONLY, structured_output=False)
@@ -102,9 +102,9 @@ def build_server(root: Path, **settings) -> FastMCP:
         name: Annotated[str, Field(description="Name of the function or method to look for")],
         limit: Annotated[int, Field(description="Maximum number of references", ge=1, le=500)] = 50,
     ) -> str:
-        """Find every place a Python function is called (name(...) or obj.name(...)) or
-        imported, and which function each call is in. Uses the syntax tree, so
-        mentions in comments or strings are not counted."""
+        """Find every place a function is called (name(...) or obj.name(...)), and which
+        function each call is in. Uses the syntax tree, so mentions in comments or
+        strings are not counted. Python, JavaScript, TypeScript, Java, Go, Ruby."""
         return run(t.find_references, name=name, limit=limit)
 
     @server.tool(title="Get route info", annotations=_READ_ONLY, structured_output=False)
@@ -112,9 +112,10 @@ def build_server(root: Path, **settings) -> FastMCP:
         function: Annotated[str, Field(description="Name of a view/handler function")],
         file: Annotated[str | None, Field(description="Only look in this repo-relative file")] = None,
     ) -> str:
-        """Check whether a function is a web endpoint: its URL(s) and HTTP methods
-        (Flask/FastAPI decorators or Django urls.py) and its other decorators,
-        such as login or permission checks."""
+        """Check whether a function is a web endpoint: its URL(s) and HTTP methods and its
+        other decorators, such as login or permission checks. Understands Flask,
+        FastAPI and Django (Python), Express-style routers (JS/TS), Go net/http-style
+        routers, and Spring / NestJS route annotations."""
         return run(t.get_route_info, function=function, file=file)
 
     return server
