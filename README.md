@@ -89,7 +89,8 @@ before deciding, instead of judging a fixed window of code:
 
 ```bash
 uv run sast-triage triage reports/demo_app --agent                 # writes verdicts-agent.json
-uv run sast-triage triage reports/demo_app --agent --budget 5      # fewer tool calls per candidate
+uv run sast-triage triage reports/demo_app --agent --budget 6      # lower base budget
+uv run sast-triage triage reports/demo_app --agent --fixed-budget  # same budget for every candidate
 uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json --verdicts verdicts-agent.json
 ```
 
@@ -102,12 +103,24 @@ START -> prepare -> agent -> route --(tool calls, budget left)--> tools -> agent
 
 `prepare` builds the same opening evidence as single-shot triage, `agent` is
 the LLM with the six tools bound, `route` is plain code enforcing the
-per-candidate tool budget (default 8), `tools` runs the calls on our MCP
+candidate's tool budget, `tools` runs the calls on our MCP
 server (one server process per run, via `langchain-mcp-adapters`), and
 `finalize` asks for the same strict verdict schema as single-shot triage, so
 `evaluate` compares the two directly. Each verdict records the tool calls
-that were actually run. An agent uses several LLM calls per candidate, so
-mind rate limits on big repos (`--limit`, `--min-severity`, `--budget`).
+that were actually run.
+
+**Tool budget.** Each candidate gets its own budget, from its evidence: the
+base (`--budget`, default 8), +2 for high/critical severity, -2 for low, and
++4 when a scanner's data-flow trace crosses files (a longer chain to
+follow), within 2 and the ceiling (`--max-budget`, default 16). Every tool
+result tells the model how many calls it has left, and it may call
+`request_more_budget` once, with a reason, for 4 more calls (never past the
+ceiling); the reason is recorded in the verdict. After a run, a budget report
+shows median and max calls, how many candidates hit their budget and how
+many were extended. `--fixed-budget` turns adaptation off, for comparison.
+
+An agent uses several LLM calls per candidate, so mind rate limits on big
+repos (`--limit`, `--min-severity`, `--budget`).
 
 ## Code-navigation tools (for the agent)
 
