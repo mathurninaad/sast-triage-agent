@@ -49,7 +49,7 @@ from langchain_core.tools import BaseTool, tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from sast_triage import triage
+from sast_triage import evidence, triage
 from sast_triage.models import Candidate
 from sast_triage.triage import Judgement, Verdict
 
@@ -341,11 +341,20 @@ def build_graph(
     return graph.compile()
 
 
+def _seen_text(messages: list[AnyMessage]) -> str:
+    """Everything the model was shown: the opening evidence and every tool result
+    (not its own notes, which are claims, not evidence)."""
+    return "\n".join(_tool_text(m.content) for m in messages if isinstance(m, (HumanMessage, ToolMessage)))
+
+
 async def triage_candidate(
-    graph, candidate: Candidate, base_dir: Path, model: str, budget: int, max_budget: int = MAX_BUDGET
+    graph, candidate: Candidate, base_dir: Path, model: str, budget: int, max_budget: int = MAX_BUDGET,
+    evidence_check: bool = True,
 ) -> Verdict:
     """Run the agent on one candidate with a starting budget. Import-only warnings
-    use the fixed rule, and any failure keeps the candidate for human review."""
+    use the fixed rule, and any failure keeps the candidate for human review.
+    With evidence_check, the verdict's citations are checked against the code
+    and against what the agent actually read (see evidence.py)."""
     if triage.is_import_warning_only(candidate):
         def never(_):
             raise AssertionError("not called")
@@ -364,9 +373,12 @@ async def triage_candidate(
         return Verdict(source_is_attacker_controlled="unclear", sanitized="unclear",
                        reasoning="Automatic triage failed; review manually.", verdict="needs_review",
                        confidence=0.0, error=f"{type(exc).__name__}: {exc}", tool_budget=budget, **meta)
-    return Verdict(**state["judgement"].model_dump(), tool_calls=state["trail"],
-                   tool_budget=state["budget"], budget_extended=state["extended"],
-                   parse_retries=state["parse_retries"], repaired_calls=state["repaired"], **meta)
+    verdict = Verdict(**state["judgement"].model_dump(), tool_calls=state["trail"],
+                      tool_budget=state["budget"], budget_extended=state["extended"],
+                      parse_retries=state["parse_retries"], repaired_calls=state["repaired"], **meta)
+    if evidence_check:
+        verdict = evidence.check_verdict(verdict, candidate, base_dir, _seen_text(state["messages"]))
+    return verdict
 
 
 def _server_command(base_dir: Path) -> dict:
@@ -389,6 +401,7 @@ async def triage_all(
     on_progress: Callable[[int, Candidate], None] | None = None,
     max_budget: int = MAX_BUDGET,
     adaptive: bool = True,
+    evidence_check: bool = True,
 ) -> list[Verdict]:
     """Triage candidates with the agent, using Groq and our MCP server.
     One MCP server process serves the whole run. With adaptive=True each
@@ -422,7 +435,8 @@ async def triage_all(
             if on_progress:
                 on_progress(i, cand)
             start = budget_for(cand, budget, max_budget) if adaptive else min(budget, max_budget)
-            verdicts.append(await triage_candidate(graph, cand, base_dir, model, start, max_budget))
+            verdicts.append(await triage_candidate(graph, cand, base_dir, model, start, max_budget,
+                                                   evidence_check))
         return verdicts
 
 
