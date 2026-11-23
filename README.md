@@ -82,6 +82,33 @@ call fails, that candidate is kept as `needs_review` with the error noted.
 Code is passed to the model inside `<code>` tags and marked as untrusted, so
 instructions hidden in comments are not followed.
 
+## Triage with the agent (tools via MCP)
+
+With `--agent`, the LLM investigates each candidate with the code tools
+before deciding, instead of judging a fixed window of code:
+
+```bash
+uv run sast-triage triage reports/demo_app --agent                 # writes verdicts-agent.json
+uv run sast-triage triage reports/demo_app --agent --budget 5      # fewer tool calls per candidate
+uv run sast-triage evaluate reports/demo_app --labels eval/labels/demo_app.json --verdicts verdicts-agent.json
+```
+
+It is a LangGraph graph (`agent.py`):
+
+```
+START -> prepare -> agent -> route --(tool calls, budget left)--> tools -> agent
+                                  \--(done, or budget used up)----> finalize -> END
+```
+
+`prepare` builds the same opening evidence as single-shot triage, `agent` is
+the LLM with the six tools bound, `route` is plain code enforcing the
+per-candidate tool budget (default 8), `tools` runs the calls on our MCP
+server (one server process per run, via `langchain-mcp-adapters`), and
+`finalize` asks for the same strict verdict schema as single-shot triage, so
+`evaluate` compares the two directly. Each verdict records the tool calls
+that were actually run. An agent uses several LLM calls per candidate, so
+mind rate limits on big repos (`--limit`, `--min-severity`, `--budget`).
+
 ## Code-navigation tools (for the agent)
 
 The triage agent investigates with six read-only tools. Try them by hand:
