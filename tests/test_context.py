@@ -113,12 +113,12 @@ def test_route_info_flask_and_django(repo):
     assert "looks like an access check: @login_required" in flask
     django = t.get_route_info(repo, "report")
     assert "urls.py:3" in django and "path('report/', views.report)" in django
-    assert "No route found" in t.get_route_info(repo, "lookup", file="db.py")
+    assert "No route found" in t.get_route_info(repo, "lookup", path="db.py")
 
 
 def test_output_is_capped(repo, tmp_path):
     (tmp_path / "big.py").write_text("".join(f"x_{i} = 'needle'\n" for i in range(3000)))
-    out = t.search_code(repo, "needle", limit=5000)
+    out = t.search_code(repo, "needle", max_results=5000)
     assert len(out) <= t.MAX_OUTPUT_CHARS + 100 and "output cut" in out
 
 

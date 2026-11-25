@@ -47,7 +47,7 @@ def test_ruby_call_without_parentheses(repo):
 def test_get_function_includes_decorators_and_annotations(repo):
     ts_out = t.get_function(repo, "UsersController.findOne")
     assert "users.controller.ts:7-11" in ts_out and '@Get(":id")' in ts_out and "@UseGuards(AuthGuard)" in ts_out
-    java = t.get_function(repo, "show", file="UserController.java")
+    java = t.get_function(repo, "show", path="UserController.java")
     assert "UserController.java:8-13 (UserController.show)" in java and "@PreAuthorize" in java
 
 
@@ -71,7 +71,7 @@ def test_routes_nestjs_with_controller_prefix(repo):
 
 
 def test_routes_spring_with_class_prefix(repo):
-    out = t.get_route_info(repo, "show", file="UserController.java")
+    out = t.get_route_info(repo, "show", path="UserController.java")
     assert "routes: GET /api/users/{id}" in out
     assert "access check: @PreAuthorize" in out
 
@@ -83,7 +83,7 @@ def test_routes_go_net_http(repo):
 def test_structural_tools_refuse_unsupported_files(repo, tmp_path):
     (tmp_path / "notes.txt").write_text("hello")
     with pytest.raises(RepoError, match="read_file or search_code"):
-        t.get_function(Repo(tmp_path), "x", file="notes.txt")
+        t.get_function(Repo(tmp_path), "x", path="notes.txt")
 
 
 def test_broken_code_still_parses(tmp_path):

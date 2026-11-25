@@ -9,7 +9,8 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from sast_triage.mcp_server import SERVER_NAME, build_server
 
 DEMO_APP = Path(__file__).parent.parent / "examples" / "demo_app"
-EXPECTED_TOOLS = {"list_files", "read_file", "search_code", "get_function", "find_references", "get_route_info"}
+EXPECTED_TOOLS = {"list_files", "read_file", "search_code", "get_function", "find_references",
+                  "trace_callers", "get_route_info"}
 
 
 def _text(result) -> str:
@@ -26,7 +27,7 @@ def run_in_memory(check):
     anyio.run(main)
 
 
-def test_lists_six_read_only_tools_with_descriptions():
+def test_lists_seven_read_only_tools_with_descriptions():
     async def check(client: ClientSession):
         tools = (await client.list_tools()).tools
         assert {tool.name for tool in tools} == EXPECTED_TOOLS
@@ -36,6 +37,10 @@ def test_lists_six_read_only_tools_with_descriptions():
         params = {tool.name: tool.inputSchema for tool in tools}
         assert params["find_references"]["required"] == ["name"]
         assert "description" in params["read_file"]["properties"]["path"]
+        # parameter names follow the conventions models already use
+        assert set(params["read_file"]["properties"]) == {"path", "line_start", "line_end"}
+        assert set(params["search_code"]["properties"]) == {"query", "regex", "path", "max_results"}
+        assert "trace_callers" in next(t.description for t in tools if t.name == "find_references")
 
     run_in_memory(check)
 
@@ -67,7 +72,7 @@ def test_bad_path_is_a_tool_error_not_a_crash():
         result = await client.call_tool("read_file", {"path": "../../etc/passwd"})
         assert result.isError and "outside the repository" in _text(result)
         # the server is still fine afterwards
-        ok = await client.call_tool("list_files", {"pattern": "*.py"})
+        ok = await client.call_tool("list_files", {"path": "*.py"})
         assert not ok.isError and "app.py" in _text(ok)
 
     run_in_memory(check)
@@ -75,7 +80,7 @@ def test_bad_path_is_a_tool_error_not_a_crash():
 
 def test_invalid_arguments_are_rejected():
     async def check(client: ClientSession):
-        result = await client.call_tool("read_file", {"path": "app.py", "start": 0})
+        result = await client.call_tool("read_file", {"path": "app.py", "line_start": 0})
         assert result.isError
 
     run_in_memory(check)

@@ -91,6 +91,10 @@ class Verdict(BaseModel):
     repaired_calls: list[str] = Field(
         default_factory=list, description="Agent only: tool calls whose name or arguments were corrected"
     )
+    tokens_in: int | None = Field(default=None, description="Prompt tokens over all model calls (if reported)")
+    tokens_out: int | None = Field(default=None, description="Completion tokens over all model calls (if reported)")
+    model_calls: int = Field(default=0, description="LLM requests made for this verdict")
+    repeated_calls: int = Field(default=0, description="Agent only: tool calls that repeated an earlier one")
     evidence: list[Citation] = Field(default_factory=list, description="The cited code, as checked")
     evidence_status: Literal["verified", "unseen", "contradicted", "none", "error"] | None = Field(
         default=None, description="Result of the evidence check (None if it did not run)"
@@ -102,7 +106,14 @@ class Verdict(BaseModel):
 
 
 Message = tuple[str, str]  # (role, content), the format LangChain chat models accept
-Judge = Callable[[list[Message]], Judgement]
+# A judge returns a Judgement, or (Judgement, usage) where usage is LangChain's
+# usage_metadata ({"input_tokens": ..., "output_tokens": ...}) when known.
+Judge = Callable[[list[Message]], "Judgement | tuple[Judgement, dict | None]"]
+
+
+def split_usage(result) -> tuple[Judgement, dict | None]:
+    """A judge's result as (Judgement, usage or None)."""
+    return result if isinstance(result, tuple) else (result, None)
 
 
 SYSTEM_PROMPT = """You are an experienced application security engineer triaging the \
@@ -235,7 +246,7 @@ def triage_candidate(
         )
     messages = build_messages(candidate, base_dir)
     try:
-        judgement = judge(messages)
+        judgement, usage = split_usage(judge(messages))
     except Exception as exc:  # network, rate limit, malformed output: record and carry on
         return Verdict(
             source_is_attacker_controlled="unclear",
@@ -247,11 +258,30 @@ def triage_candidate(
             model=model,
             **meta,
         )
-    verdict = Verdict(**judgement.model_dump(), model=model, **meta)
+    usage = usage or {}
+    verdict = Verdict(**judgement.model_dump(), model=model, model_calls=1,
+                      tokens_in=usage.get("input_tokens"), tokens_out=usage.get("output_tokens"), **meta)
     if evidence_check:
         from sast_triage import evidence
         verdict = evidence.check_verdict(verdict, candidate, base_dir, seen_text=messages[1][1])
     return verdict
+
+
+def token_report(verdicts: list[Verdict]) -> dict:
+    """Token use over the verdicts that made model calls (rule-based ones excluded)."""
+    used = [v for v in verdicts if v.tokens_in is not None or v.tokens_out is not None]
+    if not used:
+        return {"candidates": 0}
+    per = sorted((v.tokens_in or 0) + (v.tokens_out or 0) for v in used)
+    return {
+        "candidates": len(used),
+        "tokens_in": sum(v.tokens_in or 0 for v in used),
+        "tokens_out": sum(v.tokens_out or 0 for v in used),
+        "total": sum(per),
+        "median_per_candidate": per[len(per) // 2],
+        "max_per_candidate": per[-1],
+        "model_calls": sum(v.model_calls for v in used),
+    }
 
 
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -268,6 +298,14 @@ def prioritize(
     return chosen[:limit] if limit is not None else chosen
 
 
+def parse_structured(result: dict) -> tuple[Judgement, dict | None]:
+    """The output of with_structured_output(..., include_raw=True) as (Judgement, usage)."""
+    parsed = result.get("parsed")
+    if not isinstance(parsed, Judgement):
+        raise result.get("parsing_error") or ValueError("the model did not return a Judgement")
+    return parsed, getattr(result.get("raw"), "usage_metadata", None)
+
+
 def groq_judge(model: str = DEFAULT_MODEL) -> Judge:
     """A judge backed by a Groq-hosted model through LangChain.
 
@@ -282,12 +320,9 @@ def groq_judge(model: str = DEFAULT_MODEL) -> Judge:
 
     # Retries back off and wait, which absorbs short rate-limit (HTTP 429) pauses.
     llm = ChatGroq(model=model, temperature=0, max_retries=6)
-    structured = llm.with_structured_output(Judgement)
+    structured = llm.with_structured_output(Judgement, include_raw=True)
 
-    def judge(messages: list[Message]) -> Judgement:
-        result = structured.invoke(messages)
-        if not isinstance(result, Judgement):
-            raise ValueError(f"model returned {type(result).__name__}, not a Judgement")
-        return result
+    def judge(messages: list[Message]) -> tuple[Judgement, dict | None]:
+        return parse_structured(structured.invoke(messages))
 
     return judge
