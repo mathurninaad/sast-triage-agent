@@ -128,3 +128,18 @@ def test_demo_app_fp01_evidence():
     refs = t.find_references(repo, "get_user_by_id")
     assert "app.py:35 [call] in get_user" in refs
     assert "uid = int(user_id)" in t.get_function(repo, "get_user")
+
+
+LONG = Path(__file__).parent / "fixtures" / "long_function"
+
+
+def test_get_enclosing_function():
+    repo = Repo(LONG)
+    out = t.get_enclosing_function(repo, "app.py", 69)          # the flagged SQL line
+    assert out.startswith("app.py line 69 is inside export_report (lines 27-75)")
+    assert '@app.route("/reports/export")' in out and "def export_report():" in out
+    assert "cur.execute" not in out                              # header only, not the body
+    assert "inside login_required.wrapper" in t.get_enclosing_function(repo, "app.py", 21)  # nested
+    assert "module level" in t.get_enclosing_function(repo, "app.py", 3)
+    with pytest.raises(RepoError, match="only 75 lines"):
+        t.get_enclosing_function(repo, "app.py", 500)

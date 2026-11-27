@@ -137,3 +137,14 @@ def test_path_level_middleware_applies_to_routes_under_it(tmp_path):
 def test_calls_in_anonymous_callbacks(tmp_path):
     (tmp_path / "a.spec.js").write_text("describe('x', () => {\n  it('y', () => { login() })\n})\n")
     assert "[call] in <anonymous function in <top level>>" in t.find_references(Repo(tmp_path), "login")
+
+
+def test_get_enclosing_function_headers_include_annotations():
+    repo = Repo(POLYGLOT)
+    java = t.get_enclosing_function(repo, "UserController.java", 12)
+    assert "inside UserController.show (lines 8-13)" in java
+    assert "@PreAuthorize" in java and "public User show(" in java     # annotations and signature
+    ts = t.get_enclosing_function(repo, "users.controller.ts", 10)
+    assert "UsersController.findOne" in ts and "@UseGuards(AuthGuard)" in ts
+    assert "inside getUser" in t.get_enclosing_function(repo, "server.js", 11)
+    assert "inside Server.GetUser" in t.get_enclosing_function(repo, "main.go", 8)

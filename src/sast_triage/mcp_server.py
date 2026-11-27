@@ -1,7 +1,7 @@
 """MCP server exposing the code-navigation tools for one repository.
 
 Any MCP client (our LangGraph agent, Claude Desktop, Cursor, the MCP
-Inspector) can connect and call the same seven read-only tools, instead of
+Inspector) can connect and call the same eight read-only tools, instead of
 each having its own copy. Each server instance is locked to one repository
 folder, chosen when it starts, so a client can never point the tools at
 other parts of the disk.
@@ -33,6 +33,8 @@ SERVER_NAME = "sast-triage-code-context"
 INSTRUCTIONS = """Read-only tools for investigating one source-code repository, \
 for example to decide whether a static-analysis finding is a real vulnerability.
 
+If the function around a flagged line is not visible in the code you have, \
+get_enclosing_function names it (once is enough). \
 Typical investigation, cheapest first: trace_callers on the flagged function to \
 see who calls it and with what data (one call, code included); get_route_info to \
 check whether it is reachable from a URL and behind which decorators; \
@@ -118,6 +120,17 @@ def build_server(root: Path, **settings) -> FastMCP:
         and the call lines marked '>'. The usual first step: it shows where the data
         comes from in one call, instead of find_references plus get_function per caller."""
         return run(t.trace_callers, name=name, max_results=max_results)
+
+    @server.tool(title="Get enclosing function", annotations=_READ_ONLY, structured_output=False)
+    def get_enclosing_function(
+        path: Annotated[str, Field(description="Repo-relative file path, e.g. 'app/views.py'")],
+        line: Annotated[int, Field(description="Line number (1-based)", ge=1)],
+    ) -> str:
+        """Name the function or method a line is inside, with its line range and header
+        (decorators and signature). Use it only when that function's definition is not
+        in the code you were already shown, and only once per line: the answer stays
+        above. Then use the name with trace_callers, get_route_info or get_function."""
+        return run(t.get_enclosing_function, path=path, line=line)
 
     @server.tool(title="Find references", annotations=_READ_ONLY, structured_output=False)
     def find_references(

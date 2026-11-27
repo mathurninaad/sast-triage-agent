@@ -37,3 +37,24 @@ At about 4 characters per token:
 
 The trade-off: a candidate decided with no tool calls now costs slightly
 more, an investigation costs less. Run 3 measures the net effect.
+
+## When the flagged function starts outside the code window
+
+The opening prompt shows the flagged lines plus 12 lines either side. In a
+long function the `def` line, the route decorator and the source of the data
+can all be outside that window. Experiment (`sast-experiments/enclosing_header.py`,
+a 49-line Flask view with the SQL on line 69 and `def` on line 29, run with
+the real model):
+
+| | first call | calls | tokens (mean) |
+| --- | --- | --- | --- |
+| nothing extra (3 runs) | a guessed name that does not exist, every time (`app.get_sales`, `app.main`) | 3: the guess, then the whole file in two reads | 13,584 |
+| function header in the prompt (3 runs) | `get_function('export_report')`, every time | 1 to 4 | 12,775 |
+
+All judgements were correct. About 89% of tokens are input (the conversation
+resent each turn), so each turn costs far more than a few prompt lines.
+
+Decision: the model looks for the definition in the window first; only if it
+is not there does it call the new `get_enclosing_function` tool, once (name,
+line range and header: decorators and signature), and uses that name from
+then on. A repeat of the same lookup gets the one-line "already run" reply.

@@ -9,6 +9,8 @@ returns plain text for an LLM to read, kept short by hard caps.
                    in comments or strings don't count)
   trace_callers    each caller of a function with its code: find_references
                    and get_function in one call (the usual investigation step)
+  get_enclosing_function  which function a line is in, with its header; for
+                   when the definition is outside the code already shown
   get_route_info   which URL reaches a view function, with which decorators
 
 Parameter names follow the conventions LLMs already use for code tools
@@ -266,6 +268,38 @@ def find_references(repo: Repo, name: str, max_results: int = 50) -> str:
     return _cap(f"{len(hits)} references to {name!r}:\n" + "\n".join(shown) + more)
 
 
+@dataclass
+class _Enclosing:
+    qualname: str
+    start: int      # first decorator/annotation line
+    end: int
+    def_line: int   # the line with the def / function signature
+
+
+def _name_line(node) -> int:
+    """The line with a definition's name: its signature line, after any annotations
+    (in Java's tree a method starts at its first annotation)."""
+    name = node.child_by_field_name("name")
+    return (name or node).start_point[0] + 1
+
+
+def _enclosing_def(repo: Repo, rel: str, line: int) -> _Enclosing | None:
+    """The innermost function or method containing `line` (classes only if no
+    function does), or None at module level."""
+    file = repo.resolve(rel)
+    if file.suffix.lower() == ".py":
+        tree = repo.parse(file)
+        found = [(_Enclosing(d.qualname, d.start, d.end, d.node.lineno), isinstance(d.node, ast.ClassDef))
+                 for d in _definitions(tree)] if tree else []
+    else:
+        ts_tree, spec = _ts_tree(file)
+        found = [(_Enclosing(d.qualname, d.start, d.end, _name_line(d.node)), d.kind == "class")
+                 for d in tsx.definitions(ts_tree, spec)] if ts_tree else []
+    inside = [(e, is_class) for e, is_class in found if e.start <= line <= e.end]
+    functions = [e for e, is_class in inside if not is_class] or [e for e, _ in inside]
+    return max(functions, key=lambda e: e.start) if functions else None
+
+
 def _enclosing_span(repo: Repo, rel: str, line: int) -> tuple[int, int] | None:
     """(start, end) of the innermost function containing `line`, decorators included."""
     file = repo.resolve(rel)
@@ -277,6 +311,24 @@ def _enclosing_span(repo: Repo, rel: str, line: int) -> tuple[int, int] | None:
         spans = [(d.start, d.end) for d in tsx.definitions(ts_tree, spec) if d.kind != "class"] if ts_tree else []
     inside = [(a, b) for a, b in spans if a <= line <= b]
     return max(inside) if inside else None
+
+
+def get_enclosing_function(repo: Repo, path: str, line: int) -> str:
+    """Which function or method `line` of `path` is inside: its name, line range and
+    header (decorators/annotations and the signature line). Short by design: use the
+    name with get_function, trace_callers or get_route_info next."""
+    [file] = _source_files(repo, path)
+    rel = repo.rel(file)
+    lines = repo.read_lines(rel)
+    if not 1 <= line <= len(lines):
+        raise RepoError(f"{rel} has only {len(lines)} lines")
+    found = _enclosing_def(repo, rel, line)
+    if found is None:
+        return f"{rel} line {line} is at module level (not inside any function or class)."
+    header_end = min(found.def_line, found.start + 9)  # decorators + signature, at most 10 lines
+    header = _numbered(lines, found.start, header_end)
+    return (f"{rel} line {line} is inside {found.qualname} (lines {found.start}-{found.end}). Header:\n"
+            f"{header}")
 
 
 def trace_callers(repo: Repo, name: str, max_results: int = MAX_TRACE_CALLERS) -> str:
@@ -429,5 +481,6 @@ TOOLS = {
     "get_function": get_function,
     "find_references": find_references,
     "trace_callers": trace_callers,
+    "get_enclosing_function": get_enclosing_function,
     "get_route_info": get_route_info,
 }

@@ -2,7 +2,7 @@
 
 Same question as triage.py (is the claimed weakness real?), but instead of
 judging a fixed window of code, the model can investigate the repository
-with the seven read-only code tools, served by our MCP server, before it
+with the eight read-only code tools, served by our MCP server, before it
 decides. LangGraph runs the loop:
 
     START -> prepare -> agent -> route --(tool calls, budget left)--> tools -> agent
@@ -58,7 +58,7 @@ from sast_triage import evidence, triage
 from sast_triage.models import Candidate
 from sast_triage.triage import Judgement, Verdict
 
-AGENT_PROMPT_VERSION = "agent-v4"
+AGENT_PROMPT_VERSION = "agent-v5"
 DEFAULT_BUDGET = 8       # base tool calls per candidate, before adjustments
 MAX_BUDGET = 16          # hard ceiling, extension included
 EXTENSION = 4            # calls granted by one request_more_budget
@@ -183,7 +183,14 @@ AGENT_GUIDANCE = """
 
 You can investigate the repository before deciding, using read-only tools. \
 Paths are relative to the repository root. Each call costs time and tokens, so \
-use the most direct tool:
+use the most direct tool.
+
+First find the function the flagged lines are in: look for its definition (def, \
+function, method signature) in the code shown above. Only if it is not there, call \
+get_enclosing_function once with the flagged file and line, and use that name from \
+then on; never call it again for the same line.
+
+Then:
 - trace_callers: who calls a function and with what data, code included (usually \
 the first and often the only call you need);
 - get_route_info: whether a function is reachable from a URL, and behind which checks;

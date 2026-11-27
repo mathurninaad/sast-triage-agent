@@ -10,7 +10,7 @@ from sast_triage.mcp_server import SERVER_NAME, build_server
 
 DEMO_APP = Path(__file__).parent.parent / "examples" / "demo_app"
 EXPECTED_TOOLS = {"list_files", "read_file", "search_code", "get_function", "find_references",
-                  "trace_callers", "get_route_info"}
+                  "trace_callers", "get_enclosing_function", "get_route_info"}
 
 
 def _text(result) -> str:
@@ -27,7 +27,7 @@ def run_in_memory(check):
     anyio.run(main)
 
 
-def test_lists_seven_read_only_tools_with_descriptions():
+def test_lists_eight_read_only_tools_with_descriptions():
     async def check(client: ClientSession):
         tools = (await client.list_tools()).tools
         assert {tool.name for tool in tools} == EXPECTED_TOOLS

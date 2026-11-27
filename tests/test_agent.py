@@ -455,3 +455,51 @@ def test_guidance_steers_to_the_direct_tools():
     text = agent.AGENT_GUIDANCE
     assert text.index("trace_callers") < text.index("read_file")
     assert "never read whole files" in text and "Never repeat a call" in text
+    # the function around the flagged line: look in the window first, then one lookup
+    assert "Only if it is not there, call get_enclosing_function once" in " ".join(text.split())
+
+
+LONG = Path(__file__).parent / "fixtures" / "long_function"
+
+
+def long_candidate() -> Candidate:
+    snippet = (LONG / "app.py").read_text().splitlines()[68]
+    f = Finding(fingerprint="l", scanner="semgrep", rule_id="python.lang.security.audit.formatted-sql-query",
+                message="Detected possible formatted SQL query.", severity="high", cwe=["CWE-89"],
+                location=Location(file="app.py", start_line=69, end_line=69), snippet=snippet)
+    return Candidate(id="long", file="app.py", start_line=69, end_line=69, snippet=snippet,
+                     cwe=["CWE-89"], severity="high", scanners=["semgrep"], findings=[f])
+
+
+def test_enclosing_function_found_once_then_used_by_name():
+    """The def of export_report (line 29) is outside the window around line 69:
+    one get_enclosing_function call names it, get_function then reads it, and a
+    second lookup of the same line is answered briefly."""
+    def run_long(check):
+        async def main():
+            server = build_server(LONG)
+            async with create_connected_server_and_client_session(server._mcp_server) as session:
+                await check(await load_mcp_tools(session))
+        anyio.run(main)
+
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[call("get_enclosing_function", {"path": "app.py", "line": 69}, "1")]),
+            AIMessage(content="", tool_calls=[call("get_function", {"name": "export_report"}, "2")]),
+            AIMessage(content="", tool_calls=[call("get_enclosing_function", {"path": "app.py", "line": 69}, "3")]),
+            AIMessage(content="month comes straight from the query string."),
+        )
+        decider = Decider(verdict="true_positive",
+                          reasoning='Line 30 reads `month = request.args.get("month", "")` and line 69 puts it '
+                                    "into the query unchanged.")
+        graph = agent.build_graph(model, tools, decider)
+        v = await agent.triage_candidate(graph, long_candidate(), LONG, "m", 10)
+        first_prompt = model.inputs[0][1].content
+        assert "def export_report" not in first_prompt              # really outside the window
+        log = decider.seen[-1].content
+        assert "app.py line 69 is inside export_report (lines 27-75)" in log
+        assert v.tool_calls == ["get_enclosing_function(path='app.py', line=69)",
+                                "get_function(name='export_report')",
+                                "get_enclosing_function(path='app.py', line=69) [repeat]"]
+        assert v.repeated_calls == 1 and v.evidence_status == "verified"
+    run_long(check)
