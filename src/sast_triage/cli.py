@@ -550,11 +550,19 @@ def triage_cmd(
                 f"Tool budget ({mode}): median {r['median_calls']} calls, max {r['max_calls']}; "
                 f"{r['hit_budget']} of {r['candidates']} hit their budget, {r['extended']} asked for and got an extension."
             )
-            if r["parse_retries"] or r["repaired_calls"]:
+            if r["parse_retries"] or r["repaired_calls"] or r["repeated_calls"]:
                 console.print(
                     f"Recovered: {r['parse_retries']} unreadable model replies retried, "
-                    f"{r['repaired_calls']} tool calls with a wrong name or argument corrected."
+                    f"{r['repaired_calls']} tool calls with a wrong name or argument corrected, "
+                    f"{r['repeated_calls']} repeated calls answered briefly."
                 )
+    t = triage.token_report(verdicts)
+    if t["candidates"]:
+        console.print(
+            f"Tokens: {t['total']:,} in total ({t['tokens_in']:,} in, {t['tokens_out']:,} out) over "
+            f"{t['model_calls']} model calls; median {t['median_per_candidate']:,} per candidate, "
+            f"max {t['max_per_candidate']:,}."
+        )
     console.print(f"Saved to [bold]{scan_dir / out}[/]")
 
 

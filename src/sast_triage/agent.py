@@ -2,7 +2,7 @@
 
 Same question as triage.py (is the claimed weakness real?), but instead of
 judging a fixed window of code, the model can investigate the repository
-with the six read-only code tools, served by our MCP server, before it
+with the eight read-only code tools, served by our MCP server, before it
 decides. LangGraph runs the loop:
 
     START -> prepare -> agent -> route --(tool calls, budget left)--> tools -> agent
@@ -28,7 +28,12 @@ Hardening, from the first real run (see parse_failure and repair_call):
 - tool names with a namespace ("repo_browser.search_code") are resolved, and
   common wrong argument names ("line_start") are mapped to the real ones;
   anything else unknown is an error message listing the real parameters,
-  never silently dropped.
+  never silently dropped;
+- a call identical to an earlier one gets a one-line reply pointing back to
+  the earlier result, instead of the same output again.
+
+Every model call's token usage is added up on the verdict (tokens_in,
+tokens_out, model_calls), so changes can be measured in tokens.
 
 The model and the decider are passed in, so tests can script them.
 """
@@ -53,7 +58,7 @@ from sast_triage import evidence, triage
 from sast_triage.models import Candidate
 from sast_triage.triage import Judgement, Verdict
 
-AGENT_PROMPT_VERSION = "agent-v3"
+AGENT_PROMPT_VERSION = "agent-v5"
 DEFAULT_BUDGET = 8       # base tool calls per candidate, before adjustments
 MAX_BUDGET = 16          # hard ceiling, extension included
 EXTENSION = 4            # calls granted by one request_more_budget
@@ -64,11 +69,11 @@ PARSE_ERROR_CODES = ("output_parse_failed", "tool_use_failed")
 # Wrong argument name -> real names to try, in order. One is used only if the tool
 # has it and the call did not already set it.
 ARG_ALIASES: dict[str, tuple[str, ...]] = {
-    "line_start": ("start",), "start_line": ("start",), "from_line": ("start",),
-    "line_end": ("end",), "end_line": ("end",), "to_line": ("end",),
-    "max_results": ("limit",), "max": ("limit",), "top_k": ("limit",), "n": ("limit",),
-    "file_path": ("path", "file"), "filename": ("path", "file"),
-    "path": ("file", "pattern"), "file": ("path",), "glob": ("pattern",),
+    "start": ("line_start",), "start_line": ("line_start",), "from_line": ("line_start",),
+    "end": ("line_end",), "end_line": ("line_end",), "to_line": ("line_end",),
+    "limit": ("max_results",), "max": ("max_results",), "top_k": ("max_results",), "n": ("max_results",),
+    "pattern": ("path",), "glob": ("path",), "file": ("path",), "file_path": ("path",),
+    "filename": ("path",), "dir": ("path",), "directory": ("path",),
     "function_name": ("name", "function"), "symbol": ("name",), "func": ("function", "name"),
     "name": ("function",), "function": ("name",), "text": ("query",), "regexp": ("query",),
 }
@@ -133,6 +138,20 @@ def repair_call(name: str, args: dict, tools: dict[str, BaseTool]) -> tuple[str,
     return tool_.name, fixed, None
 
 
+def call_key(name: str, args: dict, tool_: BaseTool) -> str:
+    """Identity of a (repaired) call for spotting repeats: arguments equal to their
+    default are dropped, so search_code(query='x') == search_code(query='x', regex=False)."""
+    props = _schema(tool_).get("properties", {})
+    kept = {k: v for k, v in args.items() if not ("default" in props.get(k, {}) and props[k]["default"] == v)}
+    return f"{name}:{json.dumps(kept, sort_keys=True, default=str)}"
+
+
+def _add_usage(state_in: int, state_out: int, usage: dict | None) -> dict:
+    usage = usage or {}
+    return {"tokens_in": state_in + int(usage.get("input_tokens") or 0),
+            "tokens_out": state_out + int(usage.get("output_tokens") or 0)}
+
+
 def _call_text(name: str, args: dict) -> str:
     return f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})"
 
@@ -162,13 +181,27 @@ def request_more_budget(reason: str) -> str:
 
 AGENT_GUIDANCE = """
 
-You can investigate the repository before deciding, using read-only tools \
-(get_function, find_references, get_route_info, search_code, read_file, list_files). \
-Paths are relative to the repository root.
+You can investigate the repository before deciding, using read-only tools. \
+Paths are relative to the repository root. Each call costs time and tokens, so \
+use the most direct tool.
+
+First find the function the flagged lines are in: look for its definition (def, \
+function, method signature) in the code shown above. Only if it is not there, call \
+get_enclosing_function once with the flagged file and line, and use that name from \
+then on; never call it again for the same line.
+
+Then:
+- trace_callers: who calls a function and with what data, code included (usually \
+the first and often the only call you need);
+- get_route_info: whether a function is reachable from a URL, and behind which checks;
+- get_function: the full source of any other function or class;
+- search_code: constants, settings and strings (not callers);
+- read_file: only small ranges; never read whole files.
+Never repeat a call: its result is still above.
 
 Check the evidence your verdict depends on instead of assuming it:
-- where the data at the flagged lines comes from: get_function on the enclosing \
-function, then find_references to see its callers and what they pass;
+- where the data at the flagged lines comes from: trace_callers on the enclosing \
+function shows its callers and what they pass;
 - whether it is validated or converted on the way, possibly in another file;
 - whether the code is reachable from a request (get_route_info) and what guards it.
 
@@ -196,6 +229,10 @@ class AgentState(TypedDict):
     extended: bool       # whether the one extension has been used
     judgement: Judgement | None
     trail: Annotated[list[str], operator.add]     # calls as actually run (after repair)
+    call_keys: Annotated[list[str], operator.add]  # identities of the calls run, to spot repeats
+    tokens_in: int
+    tokens_out: int
+    model_calls: int
     repaired: Annotated[list[str], operator.add]  # "asked -> ran" for corrected calls
     parse_retries: int   # unparseable replies retried so far
     gave_up: bool        # the model's replies kept failing to parse; decided early
@@ -250,7 +287,9 @@ def build_graph(
         while True:
             try:
                 reply = await call_model(state["messages"] + extra)
-                return {"messages": [*extra, reply], "parse_retries": state["parse_retries"] + failures}
+                return {"messages": [*extra, reply], "parse_retries": state["parse_retries"] + failures,
+                        "model_calls": state["model_calls"] + failures + 1,
+                        **_add_usage(state["tokens_in"], state["tokens_out"], getattr(reply, "usage_metadata", None))}
             except Exception as exc:
                 generated = parse_failure(exc)
                 if generated is None:
@@ -259,7 +298,8 @@ def build_graph(
                 note = AIMessage(content=generated.strip() or "(the reply could not be read)")
                 if failures > parse_retries:
                     return {"messages": [*extra, note], "gave_up": True,
-                            "parse_retries": state["parse_retries"] + failures}
+                            "parse_retries": state["parse_retries"] + failures,
+                            "model_calls": state["model_calls"] + failures}
                 extra += [note, HumanMessage(RETRY_NUDGE)]
 
     def route(state: AgentState) -> str:
@@ -276,7 +316,8 @@ def build_graph(
     async def run_tools(state: AgentState) -> dict:
         calls = state["messages"][-1].tool_calls
         used, budget, extended = state["tool_calls_used"], state["budget"], state["extended"]
-        results, trail, repaired = [], [], []
+        results, trail, repaired, keys = [], [], [], []
+        earlier = list(state["call_keys"])
         for call in calls:
             if call["name"] == EXTENSION_TOOL:
                 if extended:
@@ -289,8 +330,12 @@ def build_graph(
                 trail.append(_call_text(EXTENSION_TOOL, call["args"]))
             else:
                 name, args, error = repair_call(call["name"], call["args"], by_name)
+                key = call_key(name, args, by_name[name]) if not error else None
                 if error:
                     text = error
+                elif key in earlier:
+                    text = ("Already run: this is the same call as an earlier one, and its result is "
+                            "above. Use that result, or try a different call.")
                 else:
                     try:
                         text = _tool_text(await by_name[name].ainvoke(args))
@@ -298,12 +343,18 @@ def build_graph(
                         text = f"Error: {type(exc).__name__}: {exc}"
                     if (name, args) != (call["name"], call["args"]):
                         repaired.append(f"{_call_text(call['name'], call['args'])} -> {_call_text(name, args)}")
-                trail.append(_call_text(name, args) + (" [error]" if text.startswith("Error:") else ""))
+                if key is not None and key in earlier:
+                    trail.append(_call_text(name, args) + " [repeat]")
+                else:
+                    trail.append(_call_text(name, args) + (" [error]" if text.startswith("Error:") else ""))
+                    if key is not None:
+                        earlier.append(key)
+                        keys.append(key)
                 used += 1
             text += f"\n[calls left: {max(budget - used, 0)} of {budget}]"
             results.append(ToolMessage(content=text, tool_call_id=call["id"], name=call["name"]))
         return {"messages": results, "tool_calls_used": used, "budget": budget, "extended": extended,
-                "trail": trail, "repaired": repaired}
+                "trail": trail, "repaired": repaired, "call_keys": keys}
 
     async def finalize(state: AgentState) -> dict:
         messages = state["messages"]
@@ -322,7 +373,9 @@ def build_graph(
         final = opening + [HumanMessage(f"Investigation log:\n{log}\n\n{FINAL_INSTRUCTION}")]
         for attempt in range(parse_retries + 1):
             try:
-                return {"judgement": await decide(final)}
+                judgement, usage = triage.split_usage(await decide(final))
+                return {"judgement": judgement, "model_calls": state["model_calls"] + attempt + 1,
+                        **_add_usage(state["tokens_in"], state["tokens_out"], usage)}
             except Exception as exc:
                 if parse_failure(exc) is None or attempt == parse_retries:
                     raise
@@ -366,7 +419,8 @@ async def triage_candidate(
         state = await graph.ainvoke(
             {"candidate": candidate, "base_dir": str(base_dir), "messages": [],
              "tool_calls_used": 0, "budget": budget, "extended": False, "judgement": None,
-             "trail": [], "repaired": [], "parse_retries": 0, "gave_up": False},
+             "trail": [], "repaired": [], "parse_retries": 0, "gave_up": False,
+             "call_keys": [], "tokens_in": 0, "tokens_out": 0, "model_calls": 0},
             config={"recursion_limit": 2 * max_budget + 10},
         )
     except Exception as exc:
@@ -375,7 +429,10 @@ async def triage_candidate(
                        confidence=0.0, error=f"{type(exc).__name__}: {exc}", tool_budget=budget, **meta)
     verdict = Verdict(**state["judgement"].model_dump(), tool_calls=state["trail"],
                       tool_budget=state["budget"], budget_extended=state["extended"],
-                      parse_retries=state["parse_retries"], repaired_calls=state["repaired"], **meta)
+                      parse_retries=state["parse_retries"], repaired_calls=state["repaired"],
+                      repeated_calls=sum(1 for c in state["trail"] if c.endswith(" [repeat]")),
+                      model_calls=state["model_calls"],
+                      tokens_in=state["tokens_in"] or None, tokens_out=state["tokens_out"] or None, **meta)
     if evidence_check:
         verdict = evidence.check_verdict(verdict, candidate, base_dir, _seen_text(state["messages"]))
     return verdict
@@ -418,16 +475,13 @@ async def triage_all(
         tools = await load_mcp_tools(session)
         llm = ChatGroq(model=model, temperature=0, max_retries=6)
         with_tools = llm.bind_tools([*tools, request_more_budget])
-        structured = llm.with_structured_output(Judgement)
+        structured = llm.with_structured_output(Judgement, include_raw=True)
 
         async def call_model(messages):
             return await with_tools.ainvoke(messages)
 
         async def decide(messages):
-            result = await structured.ainvoke(messages)
-            if not isinstance(result, Judgement):
-                raise ValueError(f"model returned {type(result).__name__}, not a Judgement")
-            return result
+            return triage.parse_structured(await structured.ainvoke(messages))
 
         graph = build_graph(call_model, tools, decide, max_budget=max_budget)
         verdicts = []
@@ -455,4 +509,5 @@ def budget_report(verdicts: list[Verdict]) -> dict:
         "extended": sum(1 for v in ran if v.budget_extended),
         "parse_retries": sum(v.parse_retries for v in ran),
         "repaired_calls": sum(len(v.repaired_calls) for v in ran),
+        "repeated_calls": sum(v.repeated_calls for v in ran),
     }

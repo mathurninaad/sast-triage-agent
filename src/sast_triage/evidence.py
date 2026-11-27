@@ -11,7 +11,9 @@ code and no second model:
    the flagged file;
 2. the file must exist and the line must be inside it;
 3. code quoted in backticks in the same sentence must be within a few lines
-   of that sentence's citations;
+   of that sentence's citations, or be defined elsewhere and used on the cited
+   lines by name ("`HOSTNAME_RE = re.compile(...)` at line 68", where line 68
+   is `if not HOSTNAME_RE.match(host)` and the definition is on line 20);
 4. the cited line must have been in front of the model: in its tool
    results (agent) or in the code window it was shown (single-shot).
 
@@ -165,6 +167,31 @@ def _quote_near(quote: str, cites: list[_Raw], files: _Files) -> bool:
     return False
 
 
+_COMMON = {"self", "this", "return", "import", "from", "None", "True", "False", "null",
+           "true", "false", "def", "function", "const", "class", "new", "str", "int"}
+
+
+def _names(quote: str) -> set[str]:
+    """Identifiers in quoted code that are specific enough to track (4+ characters)."""
+    return {n for n in re.findall(r"[A-Za-z_]\w{3,}", quote) if n not in _COMMON}
+
+
+def _defined_elsewhere(quote: str, cites: list[_Raw], files: _Files,
+                       prefer: list[str], anchor: int) -> tuple[str, int] | None:
+    """Where quoted code really is, if it exists elsewhere and one of its names
+    appears on the cited lines (the cite points at a use, the quote at the definition)."""
+    where = _find_quote(quote, prefer, files, anchor)
+    if where is None:
+        return None
+    names = _names(quote)
+    for c in cites:
+        lines = files.lines(c.resolved) if c.resolved else []
+        cited = " ".join(lines[max(0, c.start - 1):c.end])
+        if any(re.search(rf"\b{re.escape(n)}\b", cited) for n in names):
+            return where
+    return None
+
+
 def _find_quote(quote: str, prefer: list[str], files: _Files, anchor: int) -> tuple[str, int] | None:
     """Where quoted code appears: in the first preferred file that has it (in the
     flagged file, the occurrence closest to the flagged line), else anywhere."""
@@ -188,7 +215,17 @@ def check(reasoning: str, candidate: Candidate, repo: Repo, seen_text: str | Non
         cites = [c for c in raws if lo <= c.pos < hi]
         quotes = [q for q in QUOTE_RE.findall(sentence) if _code_like(q)]
         if cites:
-            bad_quotes = [q for q in quotes if not _quote_near(q, [c for c in cites if c.resolved], files)]
+            resolved = [c for c in cites if c.resolved]
+            prefer = [candidate.file, *dict.fromkeys(c.resolved for c in resolved)]
+            bad_quotes, elsewhere = [], []
+            for q in quotes:
+                if _quote_near(q, resolved, files):
+                    continue
+                where = _defined_elsewhere(q, resolved, files, prefer, candidate.start_line)
+                if where:
+                    elsewhere.append((q, *where))
+                else:
+                    bad_quotes.append(q)
             for c in cites:
                 shown = c.resolved or c.file or "?"
                 cite = dict(file=shown, start_line=c.start, end_line=c.end,
@@ -209,6 +246,11 @@ def check(reasoning: str, candidate: Candidate, repo: Repo, seen_text: str | Non
                                             detail="this line was never shown to the model"))
                 else:
                     results.append(Citation(**cite, status="verified"))
+            for q, rel, line in elsewhere:  # the definition the quote really points at
+                seen = _seen(files.lines(rel), line, line, rel, seen_text)
+                results.append(Citation(file=rel, start_line=line, end_line=line, quote=q,
+                                        status="verified" if seen else "unseen",
+                                        detail="" if seen else "this line was never shown to the model"))
         else:  # quoted code without a line number: evidence if found, ignored if not
             prefer = [candidate.file, *[r for n in FILE_RE.findall(sentence) if (r := files.resolve(n))]]
             for q in quotes:

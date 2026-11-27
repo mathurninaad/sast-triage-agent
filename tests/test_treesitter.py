@@ -47,7 +47,7 @@ def test_ruby_call_without_parentheses(repo):
 def test_get_function_includes_decorators_and_annotations(repo):
     ts_out = t.get_function(repo, "UsersController.findOne")
     assert "users.controller.ts:7-11" in ts_out and '@Get(":id")' in ts_out and "@UseGuards(AuthGuard)" in ts_out
-    java = t.get_function(repo, "show", file="UserController.java")
+    java = t.get_function(repo, "show", path="UserController.java")
     assert "UserController.java:8-13 (UserController.show)" in java and "@PreAuthorize" in java
 
 
@@ -71,7 +71,7 @@ def test_routes_nestjs_with_controller_prefix(repo):
 
 
 def test_routes_spring_with_class_prefix(repo):
-    out = t.get_route_info(repo, "show", file="UserController.java")
+    out = t.get_route_info(repo, "show", path="UserController.java")
     assert "routes: GET /api/users/{id}" in out
     assert "access check: @PreAuthorize" in out
 
@@ -83,7 +83,7 @@ def test_routes_go_net_http(repo):
 def test_structural_tools_refuse_unsupported_files(repo, tmp_path):
     (tmp_path / "notes.txt").write_text("hello")
     with pytest.raises(RepoError, match="read_file or search_code"):
-        t.get_function(Repo(tmp_path), "x", file="notes.txt")
+        t.get_function(Repo(tmp_path), "x", path="notes.txt")
 
 
 def test_broken_code_still_parses(tmp_path):
@@ -137,3 +137,14 @@ def test_path_level_middleware_applies_to_routes_under_it(tmp_path):
 def test_calls_in_anonymous_callbacks(tmp_path):
     (tmp_path / "a.spec.js").write_text("describe('x', () => {\n  it('y', () => { login() })\n})\n")
     assert "[call] in <anonymous function in <top level>>" in t.find_references(Repo(tmp_path), "login")
+
+
+def test_get_enclosing_function_headers_include_annotations():
+    repo = Repo(POLYGLOT)
+    java = t.get_enclosing_function(repo, "UserController.java", 12)
+    assert "inside UserController.show (lines 8-13)" in java
+    assert "@PreAuthorize" in java and "public User show(" in java     # annotations and signature
+    ts = t.get_enclosing_function(repo, "users.controller.ts", 10)
+    assert "UsersController.findOne" in ts and "@UseGuards(AuthGuard)" in ts
+    assert "inside getUser" in t.get_enclosing_function(repo, "server.js", 11)
+    assert "inside Server.GetUser" in t.get_enclosing_function(repo, "main.go", 8)

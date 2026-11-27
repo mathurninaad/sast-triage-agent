@@ -241,7 +241,7 @@ def test_budget_report():
     r = agent.budget_report([V(["a()", "b()"], 8), V(["a()"] * 8, 8),
                              V(["a()"] * 9 + ["request_more_budget(reason='x')"], 12, True)])
     assert r == {"candidates": 3, "median_calls": 8, "max_calls": 9, "hit_budget": 1, "extended": 1,
-                 "parse_retries": 0, "repaired_calls": 0}
+                 "parse_retries": 0, "repaired_calls": 0, "repeated_calls": 0}
 
 
 def test_prompts_have_no_stray_backslashes():
@@ -322,39 +322,48 @@ def test_final_decision_is_retried_on_parse_failure():
 def test_repair_call():
     async def check(tools):
         by_name = {t.name: t for t in tools}
-        # the exact calls from run 1
+        # The names the model used in runs 1 and 2 are now the real ones: nothing to repair
+        # but the namespace.
         assert agent.repair_call("repo_browser.search_code",
                                  {"max_results": 20, "path": "", "query": "get_user_by_id("}, by_name) == (
-            "search_code", {"limit": 20, "query": "get_user_by_id("}, None)
+            "search_code", {"max_results": 20, "path": "", "query": "get_user_by_id("}, None)
         assert agent.repair_call("read_file", {"line_end": 60, "line_start": 1, "path": "app.py"}, by_name) == (
-            "read_file", {"end": 60, "start": 1, "path": "app.py"}, None)
-        assert agent.repair_call("search_code", {"max_results": 20, "path": "*", "query": "UPLOAD_DIR"},
-                                 by_name) == ("search_code", {"limit": 20, "pattern": "*", "query": "UPLOAD_DIR"}, None)
-        # correct calls are untouched; a real parameter is never overwritten by an alias
+            "read_file", {"line_end": 60, "line_start": 1, "path": "app.py"}, None)
+        # the old names still work, as aliases
+        assert agent.repair_call("read_file", {"start": 80, "end": 84, "path": "app.py"}, by_name) == (
+            "read_file", {"line_start": 80, "line_end": 84, "path": "app.py"}, None)
+        assert agent.repair_call("search_code", {"limit": 20, "pattern": "*.py", "query": "x"}, by_name) == (
+            "search_code", {"max_results": 20, "path": "*.py", "query": "x"}, None)
         assert agent.repair_call("get_function", {"name": "x", "file": "db.py"}, by_name) == (
-            "get_function", {"name": "x", "file": "db.py"}, None)
+            "get_function", {"name": "x", "path": "db.py"}, None)
+        assert agent.repair_call("get_route_info", {"name": "ping"}, by_name) == (
+            "get_route_info", {"function": "ping"}, None)
+        # a real parameter is never overwritten by an alias; the clash is reported
+        error = agent.repair_call("get_function", {"name": "x", "path": "db.py", "file": "app.py"}, by_name)[2]
+        assert "no parameter 'file'" in error
         # unknown arguments are an error naming the real ones, not silently dropped
         name, _, error = agent.repair_call("read_file", {"path": "app.py", "lines": "80-84"}, by_name)
         assert name == "read_file" and "no parameter 'lines'" in error
-        assert "read_file(path (required), start, end)" in error
+        assert "read_file(path (required), line_start, line_end)" in error
         assert "no tool called 'delete_everything'" in agent.repair_call("delete_everything", {}, by_name)[2]
     run(check)
 
 
 def test_repaired_call_returns_the_lines_that_were_asked_for():
-    """Before: read_file(line_start=80, line_end=84) silently returned lines 1-122."""
+    """Run 1: read_file(line_start=80, line_end=84) silently returned lines 1-122.
+    Those names are now the real ones; the old ones are repaired."""
     async def check(tools):
         model = Script(
             AIMessage(content="", tool_calls=[
-                call("functions.read_file", {"path": "app.py", "line_start": 80, "line_end": 84}, "1")]),
+                call("functions.read_file", {"path": "app.py", "start": 80, "end": 84}, "1")]),
             AIMessage(content="done"),
         )
         decider = Decider()
         v = await agent.triage_candidate(agent.build_graph(model, tools, decider), fp01(), DEMO_APP, "m", 8)
         assert "app.py (lines 80-84 of" in decider.seen[-1].content
-        assert v.tool_calls == ["read_file(path='app.py', start=80, end=84)"]
-        assert v.repaired_calls == ["functions.read_file(path='app.py', line_start=80, line_end=84) -> "
-                                    "read_file(path='app.py', start=80, end=84)"]
+        assert v.tool_calls == ["read_file(path='app.py', line_start=80, line_end=84)"]
+        assert v.repaired_calls == ["functions.read_file(path='app.py', start=80, end=84) -> "
+                                    "read_file(path='app.py', line_start=80, line_end=84)"]
         assert agent.budget_report([v])["repaired_calls"] == 1
     run(check)
 
@@ -381,3 +390,116 @@ def test_agent_evidence_is_checked_against_what_it_read():
         assert v.verdict == "needs_review" and v.original_verdict == "false_positive"
         assert v.evidence_status == "unseen" and "never shown" in v.missing_context
     run(check)
+
+
+# Efficient tool use (step 19)
+
+
+def test_trace_callers_answers_fp01_in_one_call():
+    async def check(tools):
+        model = Script(AIMessage(content="", tool_calls=[call("trace_callers", {"name": "get_user_by_id"}, "1")]),
+                       AIMessage(content="The only caller casts with int()."))
+        decider = Decider(reasoning="app.py (line 34) casts the value with `uid = int(user_id)` first.")
+        v = await agent.triage_candidate(agent.build_graph(model, tools, decider), fp01(), DEMO_APP, "m", 8)
+        log = decider.seen[-1].content
+        assert '@app.route("/users/<user_id>")' in log and ">35 |" in log and "uid = int(user_id)" in log
+        assert v.tool_calls == ["trace_callers(name='get_user_by_id')"]
+        assert v.verdict == "false_positive" and v.evidence_status == "verified"
+    run(check)
+
+
+def test_repeated_calls_get_a_short_reply():
+    """Run 2 searched for save_stats four times; a repeat now costs one line, not the output."""
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[call("search_code", {"query": "CACHE_FILE"}, "1")]),
+            AIMessage(content="", tool_calls=[call("search_code", {"query": "CACHE_FILE", "regex": False}, "2")]),
+            AIMessage(content="", tool_calls=[call("search_code", {"query": "CACHE_FILE", "path": "*.py"}, "3")]),
+            AIMessage(content="done"),
+        )
+        decider = Decider()
+        v = await agent.triage_candidate(agent.build_graph(model, tools, decider), fp01(), DEMO_APP, "m", 8)
+        log = decider.seen[-1].content
+        assert log.count("matches for 'CACHE_FILE'") == 2   # the first call and the different one (path)
+        assert "Already run" in log
+        assert v.repeated_calls == 1
+        assert v.tool_calls[1] == "search_code(query='CACHE_FILE', regex=False) [repeat]"
+        assert agent.budget_report([v])["repeated_calls"] == 1
+    run(check)
+
+
+def test_token_usage_is_added_up():
+    from sast_triage import triage
+
+    async def check(tools):
+        def reply(**kw):
+            return AIMessage(**kw, usage_metadata={"input_tokens": 1000, "output_tokens": 50, "total_tokens": 1050})
+        model = Script(reply(content="", tool_calls=[call("trace_callers", {"name": "get_user_by_id"}, "1")]),
+                       reply(content="done"))
+
+        class UsageDecider(Decider):
+            async def __call__(self, messages):
+                return await super().__call__(messages), {"input_tokens": 1500, "output_tokens": 200}
+
+        v = await agent.triage_candidate(agent.build_graph(model, tools, UsageDecider()), fp01(), DEMO_APP, "m", 8)
+        assert (v.tokens_in, v.tokens_out, v.model_calls) == (3500, 300, 3)
+        r = triage.token_report([v, v.model_copy(update={"tokens_in": 100, "tokens_out": 10})])
+        assert r["total"] == 3800 + 110 and r["max_per_candidate"] == 3800 and r["model_calls"] == 6
+        # a scripted model with no usage reported leaves the fields empty, not zero
+        v = await agent.triage_candidate(agent.build_graph(Script(), tools, Decider()), fp01(), DEMO_APP, "m", 8)
+        assert v.tokens_in is None and v.model_calls == 2
+    run(check)
+
+
+def test_guidance_steers_to_the_direct_tools():
+    text = agent.AGENT_GUIDANCE
+    assert text.index("trace_callers") < text.index("read_file")
+    assert "never read whole files" in text and "Never repeat a call" in text
+    # the function around the flagged line: look in the window first, then one lookup
+    assert "Only if it is not there, call get_enclosing_function once" in " ".join(text.split())
+
+
+LONG = Path(__file__).parent / "fixtures" / "long_function"
+
+
+def long_candidate() -> Candidate:
+    snippet = (LONG / "app.py").read_text().splitlines()[68]
+    f = Finding(fingerprint="l", scanner="semgrep", rule_id="python.lang.security.audit.formatted-sql-query",
+                message="Detected possible formatted SQL query.", severity="high", cwe=["CWE-89"],
+                location=Location(file="app.py", start_line=69, end_line=69), snippet=snippet)
+    return Candidate(id="long", file="app.py", start_line=69, end_line=69, snippet=snippet,
+                     cwe=["CWE-89"], severity="high", scanners=["semgrep"], findings=[f])
+
+
+def test_enclosing_function_found_once_then_used_by_name():
+    """The def of export_report (line 29) is outside the window around line 69:
+    one get_enclosing_function call names it, get_function then reads it, and a
+    second lookup of the same line is answered briefly."""
+    def run_long(check):
+        async def main():
+            server = build_server(LONG)
+            async with create_connected_server_and_client_session(server._mcp_server) as session:
+                await check(await load_mcp_tools(session))
+        anyio.run(main)
+
+    async def check(tools):
+        model = Script(
+            AIMessage(content="", tool_calls=[call("get_enclosing_function", {"path": "app.py", "line": 69}, "1")]),
+            AIMessage(content="", tool_calls=[call("get_function", {"name": "export_report"}, "2")]),
+            AIMessage(content="", tool_calls=[call("get_enclosing_function", {"path": "app.py", "line": 69}, "3")]),
+            AIMessage(content="month comes straight from the query string."),
+        )
+        decider = Decider(verdict="true_positive",
+                          reasoning='Line 30 reads `month = request.args.get("month", "")` and line 69 puts it '
+                                    "into the query unchanged.")
+        graph = agent.build_graph(model, tools, decider)
+        v = await agent.triage_candidate(graph, long_candidate(), LONG, "m", 10)
+        first_prompt = model.inputs[0][1].content
+        assert "def export_report" not in first_prompt              # really outside the window
+        log = decider.seen[-1].content
+        assert "app.py line 69 is inside export_report (lines 27-75)" in log
+        assert v.tool_calls == ["get_enclosing_function(path='app.py', line=69)",
+                                "get_function(name='export_report')",
+                                "get_enclosing_function(path='app.py', line=69) [repeat]"]
+        assert v.repeated_calls == 1 and v.evidence_status == "verified"
+    run_long(check)

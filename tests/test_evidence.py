@@ -175,3 +175,31 @@ def test_check_evidence_command(tmp_path):
     assert "1 false_positive verdict(s) sent to review" in result.output
     saved = json.loads((scan / "checked.json").read_text())[0]
     assert saved["verdict"] == "needs_review" and saved["original_verdict"] == "false_positive"
+
+
+def test_quote_defined_elsewhere_and_used_on_the_cited_line():
+    """Agent run 2, FP-02 (verbatim): the quote is the definition (line 20), the cite
+    is where it is used (line 68). True claim, so it is verified, with both lines."""
+    text = ("However, the code validates it against a strict whitelist regex "
+            '`HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9.-]{1,253}$")` at line 68, which permits only '
+            "alphanumeric characters, dots and hyphens.")
+    c = evidence.check(text, cand("app.py", 70, 72), Repo(DEMO_APP))
+    assert [(x.file, x.start_line, x.status) for x in c] == [("app.py", 68, "verified"), ("app.py", 20, "verified")]
+    # still contradicted: code that exists nowhere, even if a name in it appears on the line
+    c = evidence.check("Line 68 checks it with `HOSTNAME_RE.fullmatch_safe(host)`.", cand("app.py", 70, 72),
+                       Repo(DEMO_APP))
+    assert c[0].status == "contradicted"
+    # still contradicted: real code elsewhere, but nothing in it appears on the cited line
+    c = evidence.check("Line 15 converts it with `uid = int(user_id)`.", cand("db.py", 15, 15), Repo(DEMO_APP))
+    assert c[0].status == "contradicted"
+
+
+def test_single_shot_records_token_usage():
+    def judge(messages):
+        return (triage.Judgement(weakness_under_review="w", source_is_attacker_controlled="yes", sanitized="no",
+                                 reasoning="Line 15 builds the query.", missing_context=None,
+                                 verdict="true_positive", confidence=0.9, exploit_scenario=None, fix=None),
+                {"input_tokens": 1200, "output_tokens": 150})
+    v = triage.triage_candidate(cand("db.py", 15, 16), DEMO_APP, judge, "m")
+    assert (v.tokens_in, v.tokens_out, v.model_calls) == (1200, 150, 1)
+    assert triage.token_report([v])["total"] == 1350

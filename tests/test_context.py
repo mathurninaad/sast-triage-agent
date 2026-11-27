@@ -113,12 +113,12 @@ def test_route_info_flask_and_django(repo):
     assert "looks like an access check: @login_required" in flask
     django = t.get_route_info(repo, "report")
     assert "urls.py:3" in django and "path('report/', views.report)" in django
-    assert "No route found" in t.get_route_info(repo, "lookup", file="db.py")
+    assert "No route found" in t.get_route_info(repo, "lookup", path="db.py")
 
 
 def test_output_is_capped(repo, tmp_path):
     (tmp_path / "big.py").write_text("".join(f"x_{i} = 'needle'\n" for i in range(3000)))
-    out = t.search_code(repo, "needle", limit=5000)
+    out = t.search_code(repo, "needle", max_results=5000)
     assert len(out) <= t.MAX_OUTPUT_CHARS + 100 and "output cut" in out
 
 
@@ -128,3 +128,18 @@ def test_demo_app_fp01_evidence():
     refs = t.find_references(repo, "get_user_by_id")
     assert "app.py:35 [call] in get_user" in refs
     assert "uid = int(user_id)" in t.get_function(repo, "get_user")
+
+
+LONG = Path(__file__).parent / "fixtures" / "long_function"
+
+
+def test_get_enclosing_function():
+    repo = Repo(LONG)
+    out = t.get_enclosing_function(repo, "app.py", 69)          # the flagged SQL line
+    assert out.startswith("app.py line 69 is inside export_report (lines 27-75)")
+    assert '@app.route("/reports/export")' in out and "def export_report():" in out
+    assert "cur.execute" not in out                              # header only, not the body
+    assert "inside login_required.wrapper" in t.get_enclosing_function(repo, "app.py", 21)  # nested
+    assert "module level" in t.get_enclosing_function(repo, "app.py", 3)
+    with pytest.raises(RepoError, match="only 75 lines"):
+        t.get_enclosing_function(repo, "app.py", 500)
